@@ -1,90 +1,163 @@
 # AgentShield
 
-**Resilient LLM Agent — four-tier graceful degradation powered by [flowguard](https://github.com/yabanci/flowguard)**
+**Production-grade resilience middleware for LLM agents — powered by [flowguard](https://github.com/yabanci/flowguard)**
 
-AgentShield wraps Ollama LLM calls with production-grade resilience primitives. When your primary model fails, requests automatically cascade through a degradation chain — no errors exposed to users.
+AgentShield demonstrates every major reliability pattern from the "Resilience Engineering" playbook, applied to LLM inference. When models fail, timeout, or overload — users never see an error.
+
+---
+
+## Degradation chain
 
 ```
-POST /chat  →  Primary model (llama3.2)       ← circuit breaker + retry
-                     ↓ on failure
-             Fallback model (llama3.2:1b)      ← circuit breaker
-                     ↓ on failure
-             In-memory response cache          ← 10-min TTL
-                     ↓ on cache miss
-             Graceful denial message           ← always available
+POST /chat
+    │
+    ▼
+[Loadshed]   adaptive AIMD limit (TCP congestion control algorithm)
+    │
+    ▼
+[Bulkhead]   interactive (20 slots) | batch (5 slots) — isolated concurrency
+    │
+    ▼
+[CircuitBreaker → Hedge → Retry]   primary model: llama3.2
+    │  Adaptive CB trips at >50% error rate over 20-call window
+    │  Hedge: if no response in 1.5s, fires duplicate request in parallel
+    │  Retry: 2x exponential backoff (300ms base)
+    │
+    │  ← circuit opens or all retries fail
+    ▼
+[CircuitBreaker]   fallback model: llama3.2:1b
+    │  Classic CB: trips after 3 consecutive failures
+    │
+    │  ← circuit opens
+    ▼
+[Semantic Cache]   nomic-embed-text embeddings + cosine similarity (threshold 0.92)
+    │  "What is Go?" and "Explain the Go language" → same cache hit
+    │  10-minute TTL, auto-pruned
+    │
+    │  ← cache miss
+    ▼
+[Graceful Denial]  always available, never panics
 ```
 
-## Why this matters
+---
 
-LLM calls fail constantly in production — GPU OOM, model loading, timeouts, rate limits. Standard retry loops aren't enough: a circuit breaker stops hammering a broken endpoint, a fallback model keeps users unblocked, and a cache absorbs repeated queries during incidents.
+## Resilience primitives
 
-AgentShield composes all four patterns into a single `agent.Ask()` call backed by the open-source `flowguard` library.
+| Pattern | Implementation | Applied to |
+|---|---|---|
+| Adaptive circuit breaker | `flowguard/circuitbreaker.NewAdaptive` | Primary model |
+| Classic circuit breaker | `flowguard/circuitbreaker.New` | Fallback model |
+| Exponential retry | `flowguard/retry` | Primary model (2 retries) |
+| Hedged requests | `flowguard/hedge` | Primary model (1.5s delay) |
+| Bulkhead | `flowguard/bulkhead` | Interactive vs batch isolation |
+| Adaptive load shedding | `flowguard/loadshed` | All requests (AIMD algorithm) |
+| Semantic cache | cosine similarity on Ollama embeddings | Response reuse |
+
+---
 
 ## Quick start
 
-**Prerequisites:** [Ollama](https://ollama.ai) installed and running.
-
 ```bash
-# Pull the models (one-time)
+# 1. Install Ollama
+brew install ollama
+
+# 2. Pull models (one-time, ~4GB total)
 ollama pull llama3.2
 ollama pull llama3.2:1b
+ollama pull nomic-embed-text
 
-# Run AgentShield
-go run . 
+# 3. Start Ollama
+ollama serve
 
-# Open the dashboard
+# 4. Run AgentShield
+go run .
+
+# 5. Open dashboard
 open http://localhost:8080
 ```
 
-## Demo: live failure injection
+---
 
-The dashboard has one-click controls to simulate failures:
+## Live demo
 
-1. Open `http://localhost:8080`
-2. Send a prompt → response comes from **primary** tier
-3. Click **Kill Primary Model** → next prompt routes to **fallback** tier
-4. Ask the same prompt again → returns from **cache** tier (instant, no model needed)
-5. Click **Restore Primary** → circuit closes, primary resumes
+The dashboard has one-click failure injection:
+
+1. Send a prompt → **primary** tier responds
+2. **Kill Primary** → next prompt routes to **fallback**
+3. Ask the same prompt → returns from **semantic cache** (instant)
+4. **Kill Fallback** too → graceful denial message
+5. **Restore Primary** → circuit recovers automatically after 15s probe
+
+Toggle **Streaming mode** to see tokens appear in real-time via SSE.
+
+---
 
 ## API
 
 ```
-POST /chat          {"prompt": "your question"}
-GET  /status        circuit breaker states, cache size, error rate
-POST /demo/kill     simulate primary model failure
-POST /demo/restore  restore primary model
-GET  /health        Ollama reachability check
+POST /chat                     {"prompt": "..."}
+GET  /chat/stream?prompt=...   SSE token stream
+GET  /status                   live snapshot of all resilience layers
+POST /demo/kill                simulate primary failure
+POST /demo/restore             restore primary
+POST /demo/kill-fallback       simulate fallback failure
+POST /demo/restore-fallback    restore fallback
+GET  /metrics                  Prometheus metrics
+GET  /health                   Ollama reachability
 ```
 
-## Architecture
+**Batch priority** (lower concurrency quota):
+```
+POST /chat
+X-Priority: batch
+```
+
+---
+
+## Prometheus metrics
+
+```
+agentshield_requests_total{tier}             counter
+agentshield_request_duration_seconds{tier}   histogram
+agentshield_cb_state{model}                  gauge (0=closed 1=half-open 2=open)
+agentshield_cache_size                       gauge
+agentshield_cache_hits_total                 counter
+agentshield_loadshed_total                   counter
+agentshield_bulkhead_full_total{type}        counter
+agentshield_hedge_fires_total                counter
+```
+
+---
+
+## Project structure
 
 ```
 main.go              HTTP server, graceful shutdown
 agent/
   agent.go           Degradation chain orchestration
-  ollama.go          Ollama HTTP client
-  cache.go           In-memory response cache (SHA-256 keyed)
+  ollama.go          Ollama HTTP client (generate, stream, embed)
+  cache.go           Semantic cache (cosine similarity + exact fallback)
+  metrics.go         Prometheus metric definitions
+  agent_test.go      Unit tests with mock Ollama server
 api/
-  handler.go         HTTP route handlers
-  dashboard.go       Single-page HTML dashboard
+  handler.go         HTTP route handlers + SSE streaming
+  dashboard.go       Single-page dashboard (Chart.js)
 ```
 
-### Resilience primitives used
+---
 
-| Primitive | Source | Applied to |
-|---|---|---|
-| Adaptive circuit breaker | `flowguard/circuitbreaker` | Primary model (trips at >50% error rate over 20-call window) |
-| Classic circuit breaker | `flowguard/circuitbreaker` | Fallback model (trips after 3 consecutive failures) |
-| Exponential retry | `flowguard/retry` | Primary model (3 attempts, 200ms base) |
-
-## Running tests
+## Tests
 
 ```bash
 go test ./...
 ```
 
-Tests use an `httptest.Server` to mock Ollama — no running Ollama needed.
+All tests use `httptest.Server` — no running Ollama required.
+
+---
 
 ## Submission
 
-Built for the [TrueFoundry Resilient Agents Challenge](https://devnetwork-ai-ml-hack-2026.devpost.com/) at DevNetwork AI+ML Hackathon 2026.
+Built for the [TrueFoundry Resilient Agents Challenge](https://devnetwork-ai-ml-hack-2026.devpost.com/) — DevNetwork AI+ML Hackathon 2026.
+
+Resilience library: [github.com/yabanci/flowguard](https://github.com/yabanci/flowguard)
