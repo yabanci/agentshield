@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (with race detector)
+        run: go test -race -count=1 ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=3m
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t agentshield:${{ github.sha }} .
+
+      - name: Smoke test
+        run: |
+          docker run -d --name as-test \
+            -e OLLAMA_URL=http://localhost:11434 \
+            -p 8080:8080 \
+            agentshield:${{ github.sha }}
+          sleep 3
+          # Health check should fail gracefully (no Ollama), not crash
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/status)
+          echo "Status endpoint returned: $STATUS"
+          [ "$STATUS" = "200" ]
+          docker stop as-test

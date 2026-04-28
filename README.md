@@ -1,5 +1,7 @@
 # AgentShield
 
+> 🏆 **Submission for [TrueFoundry Resilient Agents Challenge](https://devnetwork-ai-ml-hack-2026.devpost.com/) — DevNetwork AI+ML Hackathon 2026**
+
 **Production-grade resilience middleware for LLM agents — powered by [flowguard](https://github.com/yabanci/flowguard)**
 
 AgentShield demonstrates every major reliability pattern from the "Resilience Engineering" playbook, applied to LLM inference. When models fail, timeout, or overload — users never see an error.
@@ -43,14 +45,16 @@ POST /chat
 
 ## Resilience primitives
 
+All resilience primitives come from **[flowguard](https://github.com/yabanci/flowguard)** — an open-source Go resilience library.
+
 | Pattern | Implementation | Applied to |
 |---|---|---|
-| Adaptive circuit breaker | `flowguard/circuitbreaker.NewAdaptive` | Primary model |
-| Classic circuit breaker | `flowguard/circuitbreaker.New` | Fallback model |
-| Exponential retry | `flowguard/retry` | Primary model (2 retries) |
-| Hedged requests | `flowguard/hedge` | Primary model (1.5s delay) |
-| Bulkhead | `flowguard/bulkhead` | Interactive vs batch isolation |
-| Adaptive load shedding | `flowguard/loadshed` | All requests (AIMD algorithm) |
+| Adaptive circuit breaker | [`flowguard/circuitbreaker`](https://github.com/yabanci/flowguard/tree/main/circuitbreaker) | Primary model |
+| Classic circuit breaker | [`flowguard/circuitbreaker`](https://github.com/yabanci/flowguard/tree/main/circuitbreaker) | Fallback model |
+| Exponential retry | [`flowguard/retry`](https://github.com/yabanci/flowguard/tree/main/retry) | Primary model (2 retries) |
+| Hedged requests | [`flowguard/hedge`](https://github.com/yabanci/flowguard/tree/main/hedge) | Primary model (1.5s delay) |
+| Bulkhead | [`flowguard/bulkhead`](https://github.com/yabanci/flowguard/tree/main/bulkhead) | Interactive vs batch isolation |
+| Adaptive load shedding | [`flowguard/loadshed`](https://github.com/yabanci/flowguard/tree/main/loadshed) | All requests (AIMD algorithm) |
 | Semantic cache | cosine similarity on Ollama embeddings | Response reuse |
 
 ---

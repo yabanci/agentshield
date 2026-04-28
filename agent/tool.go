@@ -336,6 +336,13 @@ func (p *exprParser) skipWS() {
 	}
 }
 
+// ─── Exported aliases for testing ─────────────────────────────────────────
+// These let test files in package agent_test access unexported types.
+
+type ExposedCalculateTool = CalculateTool
+type ExposedGetTimeTool = GetTimeTool
+type ExposedSearchDocsTool = SearchDocsTool
+
 // ─── Knowledge base ────────────────────────────────────────────────────────
 
 type kbEntry struct {

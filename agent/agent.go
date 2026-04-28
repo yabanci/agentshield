@@ -159,6 +159,11 @@ func (a *Agent) DeleteSession(id string) { a.sessions.Delete(id) }
 // ToolList returns metadata about registered tools.
 func (a *Agent) ToolList() []map[string]string { return a.tools.List() }
 
+// ExecTool executes a named tool directly — exposed for testing.
+func (a *Agent) ExecTool(ctx context.Context, name string, args map[string]any) (string, error) {
+	return a.tools.Execute(ctx, name, args)
+}
+
 // Ask routes the prompt through the full degradation chain.
 // Wraps the entire call with load shedder and bulkhead.
 func (a *Agent) Ask(ctx context.Context, prompt string) (Response, error) {

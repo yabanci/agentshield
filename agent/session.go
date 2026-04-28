@@ -33,10 +33,22 @@ type SessionStore struct {
 }
 
 func newSessionStore() *SessionStore {
+	return newSessionStoreInternal(true)
+}
+
+// NewTestSessionStore creates a session store without the background cleanup
+// goroutine — safe for use in tests.
+func NewTestSessionStore() *SessionStore {
+	return newSessionStoreInternal(false)
+}
+
+func newSessionStoreInternal(startCleanup bool) *SessionStore {
 	s := &SessionStore{
 		sessions: make(map[string]*Session),
 	}
-	go s.cleanup()
+	if startCleanup {
+		go s.cleanup()
+	}
 	return s
 }
 
