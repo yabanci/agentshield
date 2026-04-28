@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -115,8 +116,14 @@ func newAgent(ollamaURL string) *Agent {
 	return a
 }
 
-// New creates an Agent pointed at the default local Ollama instance.
-func New() *Agent { return newAgent(ollamaBaseURL) }
+// New creates an Agent. Uses OLLAMA_URL env var if set, otherwise localhost.
+func New() *Agent {
+	url := os.Getenv("OLLAMA_URL")
+	if url == "" {
+		url = ollamaBaseURL
+	}
+	return newAgent(url)
+}
 
 // NewWithOllamaURL creates an Agent pointed at a custom Ollama URL (for testing).
 func NewWithOllamaURL(url string) *Agent {
