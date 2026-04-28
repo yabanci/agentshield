@@ -11,50 +11,49 @@ import (
 	"github.com/yabanci/agentshield/agent"
 )
 
-// mockOllama creates a test server mimicking the Ollama /api/generate endpoint.
+// mockOllama creates a test server mimicking Ollama's API surface.
+// If primaryFails=true, /api/generate calls for ModelPrimary return 500.
 func mockOllama(t *testing.T, primaryFails bool) *httptest.Server {
 	t.Helper()
-	var calls atomic.Int32
+	var callCount atomic.Int32
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/tags" {
+		switch r.URL.Path {
+		case "/api/tags":
 			w.WriteHeader(http.StatusOK)
-			return
-		}
-		n := calls.Add(1)
+		case "/api/embeddings":
+			// Return a trivial non-zero embedding so exact-fallback still works.
+			json.NewEncoder(w).Encode(map[string]any{"embedding": []float64{1, 0, 0}})
+		case "/api/generate":
+			n := callCount.Add(1)
+			var req struct {
+				Model string `json:"model"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
 
-		var req struct {
-			Model string `json:"model"`
+			if primaryFails && req.Model == agent.ModelPrimary {
+				http.Error(w, "model error", http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"response": "answer from " + req.Model + " #" + itoa(n),
+				"done":     true,
+			})
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-
-		if primaryFails && req.Model == agent.ModelPrimary {
-			http.Error(w, "model error", http.StatusInternalServerError)
-			return
-		}
-
-		resp := map[string]any{
-			"response": "answer from " + req.Model + " (call " + itoa(n) + ")",
-			"done":     true,
-		}
-		json.NewEncoder(w).Encode(resp)
 	}))
 }
 
 func itoa(n int32) string {
-	return string(rune('0' + n%10))
-}
-
-func newAgentWithURL(t *testing.T, url string) *agent.Agent {
-	t.Helper()
-	a := agent.NewWithOllamaURL(url)
-	return a
+	if n < 10 {
+		return string(rune('0' + n))
+	}
+	return "N"
 }
 
 func TestAsk_PrimarySuccess(t *testing.T) {
 	srv := mockOllama(t, false)
 	defer srv.Close()
 
-	a := newAgentWithURL(t, srv.URL)
+	a := agent.NewWithOllamaURL(srv.URL)
 	resp, err := a.Ask(context.Background(), "hello")
 
 	if err != nil {
@@ -72,7 +71,7 @@ func TestAsk_FallsBackWhenPrimaryFails(t *testing.T) {
 	srv := mockOllama(t, true)
 	defer srv.Close()
 
-	a := newAgentWithURL(t, srv.URL)
+	a := agent.NewWithOllamaURL(srv.URL)
 	resp, err := a.Ask(context.Background(), "hello")
 
 	if err != nil {
@@ -83,14 +82,14 @@ func TestAsk_FallsBackWhenPrimaryFails(t *testing.T) {
 	}
 }
 
-func TestAsk_CacheTierAfterPrimaryKilled(t *testing.T) {
+func TestAsk_CacheTierWhenBothKilled(t *testing.T) {
 	srv := mockOllama(t, false)
 	defer srv.Close()
 
-	a := newAgentWithURL(t, srv.URL)
+	a := agent.NewWithOllamaURL(srv.URL)
 	ctx := context.Background()
 
-	// Prime the cache
+	// Prime the cache via a successful primary call.
 	first, err := a.Ask(ctx, "what is go?")
 	if err != nil {
 		t.Fatalf("prime: %v", err)
@@ -99,7 +98,6 @@ func TestAsk_CacheTierAfterPrimaryKilled(t *testing.T) {
 		t.Fatalf("expected primary on first call, got %s", first.Tier)
 	}
 
-	// Kill both models
 	a.KillPrimary()
 	a.KillFallback()
 
@@ -116,13 +114,14 @@ func TestAsk_CacheTierAfterPrimaryKilled(t *testing.T) {
 }
 
 func TestAsk_GracefulDenialWhenAllDown(t *testing.T) {
-	srv := mockOllama(t, true)
+	srv := mockOllama(t, true) // primary always fails
 	defer srv.Close()
 
-	a := newAgentWithURL(t, srv.URL)
+	a := agent.NewWithOllamaURL(srv.URL)
 	a.KillFallback()
 
-	resp, err := a.Ask(context.Background(), "unique prompt no cache "+t.Name())
+	// Unique prompt → no cache entry
+	resp, err := a.Ask(context.Background(), "unique-no-cache-"+t.Name())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -135,15 +134,43 @@ func TestKillAndRestorePrimary(t *testing.T) {
 	srv := mockOllama(t, false)
 	defer srv.Close()
 
-	a := newAgentWithURL(t, srv.URL)
+	a := agent.NewWithOllamaURL(srv.URL)
 	a.KillPrimary()
-
 	if s := a.Status(); !s.PrimaryKilled {
 		t.Error("primary should be marked killed")
 	}
-
 	a.RestorePrimary()
 	if s := a.Status(); s.PrimaryKilled {
 		t.Error("primary should be restored")
+	}
+}
+
+func TestKillAndRestoreFallback(t *testing.T) {
+	srv := mockOllama(t, false)
+	defer srv.Close()
+
+	a := agent.NewWithOllamaURL(srv.URL)
+	a.KillFallback()
+	if s := a.Status(); !s.FallbackKilled {
+		t.Error("fallback should be marked killed")
+	}
+	a.RestoreFallback()
+	if s := a.Status(); s.FallbackKilled {
+		t.Error("fallback should be restored")
+	}
+}
+
+func TestStatus_ReflectsAllFields(t *testing.T) {
+	srv := mockOllama(t, false)
+	defer srv.Close()
+
+	a := agent.NewWithOllamaURL(srv.URL)
+	s := a.Status()
+
+	if s.PrimaryBreaker != "closed" {
+		t.Errorf("expected closed, got %s", s.PrimaryBreaker)
+	}
+	if s.LoadshedLimit == 0 {
+		t.Error("loadshed limit should be > 0")
 	}
 }
