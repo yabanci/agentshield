@@ -39,32 +39,8 @@ type ollamaEmbedResponse struct {
 	Embedding []float64 `json:"embedding"`
 }
 
-// OllamaMessage is a single message for the /api/chat endpoint.
-type OllamaMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type ollamaChatRequest struct {
-	Model    string          `json:"model"`
-	Messages []OllamaMessage `json:"messages"`
-	Stream   bool            `json:"stream"`
-}
-
-type ollamaChatResponse struct {
-	Message OllamaMessage `json:"message"`
-	Done    bool          `json:"done"`
-}
-
 func newHTTPClient() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second}
-}
-
-func newOllamaClient() *ollamaClient {
-	return &ollamaClient{
-		http:    newHTTPClient(),
-		baseURL: ollamaBaseURL,
-	}
 }
 
 func (c *ollamaClient) generate(ctx context.Context, model, prompt string) (string, error) {
@@ -171,34 +147,6 @@ func (c *ollamaClient) embed(ctx context.Context, text string) ([]float64, error
 		return nil, fmt.Errorf("embed decode: %w", err)
 	}
 	return out.Embedding, nil
-}
-
-// chat sends a multi-turn conversation to Ollama's /api/chat endpoint.
-func (c *ollamaClient) chat(ctx context.Context, model string, messages []OllamaMessage) (string, error) {
-	body, err := json.Marshal(ollamaChatRequest{Model: model, Messages: messages, Stream: false})
-	if err != nil {
-		return "", fmt.Errorf("chat marshal: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("chat request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("chat call: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("chat status %d", resp.StatusCode)
-	}
-	var out ollamaChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", fmt.Errorf("chat decode: %w", err)
-	}
-	return out.Message.Content, nil
 }
 
 func (c *ollamaClient) ping(ctx context.Context) error {

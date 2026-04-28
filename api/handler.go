@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -264,35 +263,22 @@ func (h *Handler) chaosStream(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(dashboardHTML))
+	_, _ = w.Write([]byte(dashboardHTML))
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(errorResponse{Error: msg})
+	_ = json.NewEncoder(w).Encode(errorResponse{Error: msg})
 }
 
 func generateSessionID() string {
 	return fmt.Sprintf("s%d", time.Now().UnixNano())
 }
-
-func sessionIDFromRequest(r *http.Request) string {
-	if id := r.Header.Get("X-Session-ID"); id != "" {
-		return id
-	}
-	if id := r.URL.Query().Get("session_id"); id != "" {
-		return id
-	}
-	return ""
-}
-
-var _ = strings.TrimSpace // keep import used via dashboard
-var _ = sessionIDFromRequest
