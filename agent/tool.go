@@ -66,7 +66,7 @@ func (r *ToolRegistry) SystemPrompt() string {
 	b.WriteString("You are a helpful AI assistant with access to tools.\n\n")
 	b.WriteString("Available tools:\n")
 	for _, t := range r.tools {
-		b.WriteString(fmt.Sprintf("- %s: %s. Args: %s\n", t.Name(), t.Description(), t.ArgsSchema()))
+		fmt.Fprintf(&b, "- %s: %s. Args: %s\n", t.Name(), t.Description(), t.ArgsSchema())
 	}
 	b.WriteString(`
 When you need to use a tool, respond EXACTLY like this (no extra text before):
@@ -194,17 +194,17 @@ func evalExpr(s string) (float64, error) {
 func (p *exprParser) parseExpr() float64 {
 	v := p.parseTerm()
 	for p.pos < len(p.input) {
-		c := p.input[p.pos]
-		if c == '+' {
+		switch p.input[p.pos] {
+		case '+':
 			p.pos++
 			p.skipWS()
 			v += p.parseTerm()
-		} else if c == '-' {
+		case '-':
 			p.pos++
 			p.skipWS()
 			v -= p.parseTerm()
-		} else {
-			break
+		default:
+			return v
 		}
 	}
 	return v
@@ -213,12 +213,12 @@ func (p *exprParser) parseExpr() float64 {
 func (p *exprParser) parseTerm() float64 {
 	v := p.parsePower()
 	for p.pos < len(p.input) {
-		c := p.input[p.pos]
-		if c == '*' {
+		switch p.input[p.pos] {
+		case '*':
 			p.pos++
 			p.skipWS()
 			v *= p.parsePower()
-		} else if c == '/' {
+		case '/':
 			p.pos++
 			p.skipWS()
 			d := p.parsePower()
@@ -227,8 +227,8 @@ func (p *exprParser) parseTerm() float64 {
 				return 0
 			}
 			v /= d
-		} else {
-			break
+		default:
+			return v
 		}
 	}
 	return v

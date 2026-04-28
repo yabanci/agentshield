@@ -21,14 +21,14 @@ func mockReactOllama(t *testing.T, responses []string) *httptest.Server {
 		case "/api/tags":
 			w.WriteHeader(http.StatusOK)
 		case "/api/embeddings":
-			json.NewEncoder(w).Encode(map[string]any{"embedding": []float64{1, 0, 0}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float64{1, 0, 0}})
 		case "/api/generate":
 			resp := "Answer: I don't know."
 			if idx < len(responses) {
 				resp = responses[idx]
 				idx++
 			}
-			json.NewEncoder(w).Encode(map[string]any{"response": resp, "done": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"response": resp, "done": true})
 		}
 	}))
 }

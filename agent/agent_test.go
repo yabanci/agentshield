@@ -22,7 +22,7 @@ func mockOllama(t *testing.T, primaryFails bool) *httptest.Server {
 			w.WriteHeader(http.StatusOK)
 		case "/api/embeddings":
 			// Return a trivial non-zero embedding so exact-fallback still works.
-			json.NewEncoder(w).Encode(map[string]any{"embedding": []float64{1, 0, 0}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float64{1, 0, 0}})
 		case "/api/generate":
 			n := callCount.Add(1)
 			var req struct {
@@ -34,7 +34,7 @@ func mockOllama(t *testing.T, primaryFails bool) *httptest.Server {
 				http.Error(w, "model error", http.StatusInternalServerError)
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"response": "answer from " + req.Model + " #" + itoa(n),
 				"done":     true,
 			})

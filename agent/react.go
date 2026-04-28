@@ -43,7 +43,7 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 	fullPrompt := tools.SystemPrompt() + "\n\n" + history + "User: " + prompt + "\nAssistant:"
 
 	var steps []ReactStep
-	var lastTier Tier = TierPrimary
+	lastTier := TierPrimary
 	conversationCtx := fullPrompt
 
 	// Record user message

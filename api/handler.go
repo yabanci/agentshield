@@ -118,12 +118,12 @@ func (h *Handler) chatStream(w http.ResponseWriter, r *http.Request) {
 
 	for token := range tokens {
 		data, _ := json.Marshal(map[string]any{"token": token, "done": false})
-		fmt.Fprintf(w, "data: %s\n\n", data)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	}
 
 	done, _ := json.Marshal(map[string]any{"done": true, "tier": string(tier)})
-	fmt.Fprintf(w, "data: %s\n\n", done)
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", done)
 	flusher.Flush()
 }
 
@@ -251,7 +251,7 @@ func (h *Handler) chaosStream(w http.ResponseWriter, r *http.Request) {
 
 	for event := range ch {
 		data, _ := json.Marshal(event)
-		fmt.Fprintf(w, "data: %s\n\n", data)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 		if event.Type == "done" {
 			return

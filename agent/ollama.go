@@ -59,7 +59,7 @@ func (c *ollamaClient) generate(ctx context.Context, model, prompt string) (stri
 	if err != nil {
 		return "", fmt.Errorf("ollama call: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("ollama status %d", resp.StatusCode)
@@ -92,7 +92,7 @@ func (c *ollamaClient) stream(ctx context.Context, model, prompt string, tokens 
 	if err != nil {
 		return fmt.Errorf("ollama stream call: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("ollama stream status %d", resp.StatusCode)
@@ -136,7 +136,7 @@ func (c *ollamaClient) embed(ctx context.Context, text string) ([]float64, error
 	if err != nil {
 		return nil, fmt.Errorf("embed call: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("embed status %d", resp.StatusCode)
@@ -158,7 +158,7 @@ func (c *ollamaClient) ping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("ollama ping status %d", resp.StatusCode)
 	}
