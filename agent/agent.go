@@ -60,6 +60,8 @@ type Status struct {
 	LoadshedInflight int     `json:"loadshed_inflight"`
 	InteractiveBusy  int     `json:"interactive_busy"`
 	BatchBusy        int     `json:"batch_busy"`
+	ActiveSessions   int     `json:"active_sessions"`
+	ChaosRunning     bool    `json:"chaos_running"`
 }
 
 // Agent is the resilient LLM client.
@@ -72,6 +74,9 @@ type Agent struct {
 	batchBH        *bulkhead.Bulkhead
 	shedder        *loadshed.Shedder
 	cache          *semanticCache
+	tools          *ToolRegistry
+	sessions       *SessionStore
+	chaosMu        atomic.Bool // true while chaos is running
 	primaryKilled  atomic.Bool
 	fallbackKilled atomic.Bool
 	totalRequests  atomic.Int64
@@ -105,6 +110,8 @@ func newAgent(ollamaURL string) *Agent {
 		shedder: loadshed.New(50, 5*time.Second),
 	}
 	a.cache = newSemanticCache(10*time.Minute, ol.embed)
+	a.tools = newToolRegistry(a)
+	a.sessions = newSessionStore()
 	return a
 }
 
@@ -114,10 +121,36 @@ func New() *Agent { return newAgent(ollamaBaseURL) }
 // NewWithOllamaURL creates an Agent pointed at a custom Ollama URL (for testing).
 func NewWithOllamaURL(url string) *Agent {
 	a := newAgent(url)
-	// Tests don't have an embedding server; disable semantic cache.
 	a.cache = newSemanticCache(10*time.Minute, nil)
 	return a
 }
+
+// StartChaos runs the automated chaos scenario asynchronously.
+// Returns a channel of events and an error if chaos is already running.
+func (a *Agent) StartChaos(ctx context.Context) (<-chan ChaosEvent, error) {
+	if !a.chaosMu.CompareAndSwap(false, true) {
+		return nil, fmt.Errorf("chaos scenario already running")
+	}
+	ch := make(chan ChaosEvent, 64)
+	go func() {
+		defer close(ch)
+		defer a.chaosMu.Store(false)
+		a.RunChaos(ctx, ch)
+	}()
+	return ch, nil
+}
+
+// GetSession returns session history by ID.
+func (a *Agent) GetSession(id string) *Session { return a.sessions.Get(id) }
+
+// ListSessions returns all active sessions.
+func (a *Agent) ListSessions() []Session { return a.sessions.List() }
+
+// DeleteSession removes a session.
+func (a *Agent) DeleteSession(id string) { a.sessions.Delete(id) }
+
+// ToolList returns metadata about registered tools.
+func (a *Agent) ToolList() []map[string]string { return a.tools.List() }
 
 // Ask routes the prompt through the full degradation chain.
 // Wraps the entire call with load shedder and bulkhead.
@@ -318,6 +351,8 @@ func (a *Agent) Status() Status {
 		LoadshedInflight: a.shedder.Inflight(),
 		InteractiveBusy:  a.interactiveBH.ActiveCount(),
 		BatchBusy:        a.batchBH.ActiveCount(),
+		ActiveSessions:   a.sessions.Count(),
+		ChaosRunning:     a.chaosMu.Load(),
 	}
 }
 
