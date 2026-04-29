@@ -460,7 +460,7 @@ type StreamToken struct {
 }
 
 // StreamWithQualityGate streams tokens with an inline quality gate.
-// If hallucination markers are detected in the first 100 tokens,
+// If hallucination markers are detected in the first 120 tokens,
 // the stream aborts and automatically continues from the fallback model.
 // The caller receives a StreamToken{Switched: true} event at the switch point.
 func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out chan<- StreamToken) (Tier, error) {
@@ -469,13 +469,15 @@ func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out ch
 		a.primaryCB.State().String() == "closed"
 
 	if canUsePrimary {
+		// Use a cancellable child context so we can abort the primary stream
+		// when the quality gate trips without leaking the stream goroutine.
+		streamCtx, cancelStream := context.WithCancel(ctx)
 		rawTokens := make(chan string, 64)
-		done := make(chan struct{})
 		var streamErr error
 
 		go func() {
 			defer close(rawTokens)
-			streamErr = a.ollama.stream(ctx, ModelPrimary, prompt, rawTokens)
+			streamErr = a.ollama.stream(streamCtx, ModelPrimary, prompt, rawTokens)
 		}()
 
 		var buf strings.Builder
@@ -486,13 +488,13 @@ func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out ch
 			buf.WriteString(token)
 			tokenCount++
 
-			// Quality gate: check every 30 tokens for hallucination markers
+			// Quality gate: check every 30 tokens for hallucination markers.
 			if tokenCount%30 == 0 && tokenCount <= 120 {
 				hallScore, reason := hallucinationScore(buf.String())
 				if hallScore < 0.5 {
-					// Cancel the primary stream and switch to fallback
 					tripped = true
-					close(done)
+					cancelStream()           // abort primary stream
+					for range rawTokens {}   // drain so goroutine can exit
 					out <- StreamToken{Switched: true, Tier: TierFallback,
 						Reason: "quality gate: " + reason}
 					break
@@ -500,7 +502,7 @@ func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out ch
 			}
 			out <- StreamToken{Token: token, Tier: TierPrimary}
 		}
-		_ = done // satisfies compiler; goroutine exits when rawTokens is closed
+		cancelStream() // no-op if already cancelled; always call to free resources
 
 		if !tripped && streamErr == nil {
 			return TierPrimary, nil
