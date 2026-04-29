@@ -50,19 +50,22 @@ type Response struct {
 
 // Status is a live snapshot of the agent's resilience state.
 type Status struct {
-	PrimaryBreaker   string  `json:"primary_breaker"`
-	FallbackBreaker  string  `json:"fallback_breaker"`
-	PrimaryKilled    bool    `json:"primary_killed"`
-	FallbackKilled   bool    `json:"fallback_killed"`
-	CacheSize        int     `json:"cache_size"`
-	TotalRequests    int64   `json:"total_requests"`
-	ErrorRate        float64 `json:"error_rate"`
-	LoadshedLimit    int     `json:"loadshed_limit"`
-	LoadshedInflight int     `json:"loadshed_inflight"`
-	InteractiveBusy  int     `json:"interactive_busy"`
-	BatchBusy        int     `json:"batch_busy"`
-	ActiveSessions   int     `json:"active_sessions"`
-	ChaosRunning     bool    `json:"chaos_running"`
+	PrimaryBreaker       string     `json:"primary_breaker"`
+	FallbackBreaker      string     `json:"fallback_breaker"`
+	PrimaryKilled        bool       `json:"primary_killed"`
+	FallbackKilled       bool       `json:"fallback_killed"`
+	CacheSize            int        `json:"cache_size"`
+	TotalRequests        int64      `json:"total_requests"`
+	ErrorRate            float64    `json:"error_rate"`
+	LoadshedLimit        int        `json:"loadshed_limit"`
+	LoadshedInflight     int        `json:"loadshed_inflight"`
+	InteractiveBusy      int        `json:"interactive_busy"`
+	BatchBusy            int        `json:"batch_busy"`
+	ActiveSessions       int        `json:"active_sessions"`
+	ChaosRunning         bool       `json:"chaos_running"`
+	PrimarySemanticCB    SBSnapshot `json:"primary_semantic_cb"`
+	FallbackSemanticCB   SBSnapshot `json:"fallback_semantic_cb"`
+	DegradeMode          bool       `json:"degrade_mode"`
 }
 
 // Agent is the resilient LLM client.
@@ -70,6 +73,9 @@ type Agent struct {
 	ollama         *ollamaClient
 	primaryCB      *circuitbreaker.Breaker
 	fallbackCB     *circuitbreaker.Breaker
+	primarySemCB   *SemanticBreaker  // semantic quality circuit breaker for primary
+	fallbackSemCB  *SemanticBreaker  // semantic quality circuit breaker for fallback
+	qualityEval    *QualityEvaluator
 	hedger         *hedge.Hedge
 	interactiveBH  *bulkhead.Bulkhead
 	batchBH        *bulkhead.Bulkhead
@@ -80,6 +86,7 @@ type Agent struct {
 	chaosMu        atomic.Bool // true while chaos is running
 	primaryKilled  atomic.Bool
 	fallbackKilled atomic.Bool
+	degradeMode    atomic.Bool  // demo: inject bad responses to primary
 	totalRequests  atomic.Int64
 }
 
@@ -110,6 +117,16 @@ func newAgent(ollamaURL string) *Agent {
 		// Loadshed: adaptive AIMD — starts at 50 concurrent, shrinks under load.
 		shedder: loadshed.New(50, 5*time.Second),
 	}
+	a.primarySemCB = NewSemanticBreaker(DefaultSBConfig)
+	a.fallbackSemCB = NewSemanticBreaker(SemanticBreakerConfig{
+		WindowSize:        6,
+		MinSamples:        2,
+		DegradedThreshold: 0.55,
+		FailingThreshold:  0.35,
+		OpenTimeout:       30 * time.Second,
+		RecoverySamples:   2,
+	})
+	a.qualityEval = newQualityEvaluator(ol.embed)
 	a.cache = newSemanticCache(10*time.Minute, ol.embed)
 	a.tools = newToolRegistry(a)
 	a.sessions = newSessionStore()
@@ -256,10 +273,13 @@ func (a *Agent) degrade(ctx context.Context, prompt string) (Response, error) {
 	}, nil
 }
 
-// tryPrimary uses hedge + circuit breaker + retry.
-// Hedge fires a duplicate primary request after 1.5s if the first is slow.
+// tryPrimary uses hedge + transport CB + semantic CB + retry.
 func (a *Agent) tryPrimary(ctx context.Context, prompt string) (string, bool) {
 	if a.primaryKilled.Load() {
+		return "", false
+	}
+	// Semantic CB check — open if quality has been consistently bad
+	if a.primarySemCB.ShouldBlock() {
 		return "", false
 	}
 
@@ -277,9 +297,18 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string) (string, bool) {
 				retry.WithExponentialBackoff(300*time.Millisecond),
 			)
 			return r.Do(ctx, func(ctx context.Context) error {
-				text, err := a.ollama.generate(ctx, ModelPrimary, prompt)
+				text, err := a.generate(ctx, ModelPrimary, prompt)
 				if err != nil {
 					return err
+				}
+				// Evaluate quality and record in semantic CB
+				quality := a.qualityEval.Evaluate(ctx, prompt, text)
+				a.primarySemCB.Record(quality.Score, quality)
+				qualityGauge.WithLabelValues("primary").Set(quality.Score)
+
+				// If this single response is extremely bad, fail fast
+				if quality.Score < QualityAcceptable && len(quality.Signals) > 0 {
+					return fmt.Errorf("semantic quality %.0f%% below acceptable threshold", quality.Score*100)
 				}
 				result = text
 				return nil
@@ -293,9 +322,12 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string) (string, bool) {
 	return result, true
 }
 
-// tryFallback uses a classic circuit breaker (no hedge — fallback must be fast).
+// tryFallback uses transport CB + semantic CB (no hedge — fallback must be fast).
 func (a *Agent) tryFallback(ctx context.Context, prompt string) (string, bool) {
 	if a.fallbackKilled.Load() {
+		return "", false
+	}
+	if a.fallbackSemCB.ShouldBlock() {
 		return "", false
 	}
 	var result string
@@ -304,6 +336,9 @@ func (a *Agent) tryFallback(ctx context.Context, prompt string) (string, bool) {
 		if err != nil {
 			return err
 		}
+		quality := a.qualityEval.Evaluate(ctx, prompt, text)
+		a.fallbackSemCB.Record(quality.Score, quality)
+		qualityGauge.WithLabelValues("fallback").Set(quality.Score)
 		result = text
 		return nil
 	})
@@ -311,6 +346,35 @@ func (a *Agent) tryFallback(ctx context.Context, prompt string) (string, bool) {
 		return "", false
 	}
 	return result, true
+}
+
+// generate is a wrapper around ollama.generate that injects degraded
+// responses when degrade mode is active (demo only).
+func (a *Agent) generate(ctx context.Context, model, prompt string) (string, error) {
+	if a.degradeMode.Load() && model == ModelPrimary {
+		return degradedResponse(prompt), nil
+	}
+	return a.ollama.generate(ctx, model, prompt)
+}
+
+// degradedResponse returns a realistic-looking but low-quality response
+// for demo purposes. Cycles through degradation types based on prompt length.
+func degradedResponse(prompt string) string {
+	switch len(prompt) % 4 {
+	case 0:
+		// Extremely short — length anomaly
+		return "Yes."
+	case 1:
+		// Hallucination marker
+		return "As an AI language model, I cannot assist with that request. I apologize, but as an AI I don't have access to real-time information."
+	case 2:
+		// Repetitive — loops
+		s := "I understand your question about this topic. "
+		return s + s + s + s + s
+	default:
+		// Incoherent — completely off-topic
+		return "The weather in Barcelona is typically warm. Cats are mammals. The capital of France is Paris."
+	}
 }
 
 // StreamPrimary streams tokens from the primary model into the channel.
@@ -338,8 +402,14 @@ func (a *Agent) KillPrimary()   { a.primaryKilled.Store(true) }
 func (a *Agent) RestorePrimary() { a.primaryKilled.Store(false) }
 
 // KillFallback / RestoreFallback simulate fallback model failures.
-func (a *Agent) KillFallback()   { a.fallbackKilled.Store(true) }
+func (a *Agent) KillFallback()    { a.fallbackKilled.Store(true) }
 func (a *Agent) RestoreFallback() { a.fallbackKilled.Store(false) }
+
+// EnableDegradeMode makes primary return low-quality responses (demo).
+func (a *Agent) EnableDegradeMode() { a.degradeMode.Store(true) }
+
+// DisableDegradeMode restores normal primary responses.
+func (a *Agent) DisableDegradeMode() { a.degradeMode.Store(false) }
 
 // Status returns a live snapshot of all resilience layers.
 func (a *Agent) Status() Status {
@@ -351,20 +421,28 @@ func (a *Agent) Status() Status {
 	if a.fallbackKilled.Load() {
 		fallbackState = "killed"
 	}
+	pSem := a.primarySemCB.Snapshot()
+	fSem := a.fallbackSemCB.Snapshot()
+	semanticCBStateGauge.WithLabelValues("primary").Set(sbStateValue(pSem.State))
+	semanticCBStateGauge.WithLabelValues("fallback").Set(sbStateValue(fSem.State))
+
 	return Status{
-		PrimaryBreaker:   primaryState,
-		FallbackBreaker:  fallbackState,
-		PrimaryKilled:    a.primaryKilled.Load(),
-		FallbackKilled:   a.fallbackKilled.Load(),
-		CacheSize:        a.cache.size(),
-		TotalRequests:    a.totalRequests.Load(),
-		ErrorRate:        a.primaryCB.ErrorRate(),
-		LoadshedLimit:    a.shedder.CurrentLimit(),
-		LoadshedInflight: a.shedder.Inflight(),
-		InteractiveBusy:  a.interactiveBH.ActiveCount(),
-		BatchBusy:        a.batchBH.ActiveCount(),
-		ActiveSessions:   a.sessions.Count(),
-		ChaosRunning:     a.chaosMu.Load(),
+		PrimaryBreaker:     primaryState,
+		FallbackBreaker:    fallbackState,
+		PrimaryKilled:      a.primaryKilled.Load(),
+		FallbackKilled:     a.fallbackKilled.Load(),
+		CacheSize:          a.cache.size(),
+		TotalRequests:      a.totalRequests.Load(),
+		ErrorRate:          a.primaryCB.ErrorRate(),
+		LoadshedLimit:      a.shedder.CurrentLimit(),
+		LoadshedInflight:   a.shedder.Inflight(),
+		InteractiveBusy:    a.interactiveBH.ActiveCount(),
+		BatchBusy:          a.batchBH.ActiveCount(),
+		ActiveSessions:     a.sessions.Count(),
+		ChaosRunning:       a.chaosMu.Load(),
+		PrimarySemanticCB:  pSem,
+		FallbackSemanticCB: fSem,
+		DegradeMode:        a.degradeMode.Load(),
 	}
 }
 

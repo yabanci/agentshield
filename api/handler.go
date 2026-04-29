@@ -54,6 +54,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /demo/restore-fallback", h.restoreFallback)
 	mux.HandleFunc("POST /demo/chaos", h.startChaos)
 	mux.HandleFunc("GET /demo/chaos/stream", h.chaosStream)
+	mux.HandleFunc("POST /demo/degrade", h.enableDegrade)
+	mux.HandleFunc("POST /demo/restore-quality", h.disableDegrade)
 
 	// Dashboard
 	mux.HandleFunc("GET /", h.dashboard)
@@ -213,6 +215,16 @@ func (h *Handler) killFallback(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) restoreFallback(w http.ResponseWriter, r *http.Request) {
 	h.agent.RestoreFallback()
 	jsonOK(w, map[string]string{"result": "fallback model restored"})
+}
+
+func (h *Handler) enableDegrade(w http.ResponseWriter, r *http.Request) {
+	h.agent.EnableDegradeMode()
+	jsonOK(w, map[string]string{"result": "degrade mode ON — primary returns low-quality responses"})
+}
+
+func (h *Handler) disableDegrade(w http.ResponseWriter, r *http.Request) {
+	h.agent.DisableDegradeMode()
+	jsonOK(w, map[string]string{"result": "degrade mode OFF — primary restored"})
 }
 
 func (h *Handler) startChaos(w http.ResponseWriter, r *http.Request) {

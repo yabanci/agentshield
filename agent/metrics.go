@@ -46,6 +46,16 @@ var (
 		Name: "agentshield_hedge_fires_total",
 		Help: "Number of times a hedge request was fired",
 	})
+
+	qualityGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "agentshield_quality_score",
+		Help: "Latest semantic quality score per model (0=trash, 1=perfect)",
+	}, []string{"model"})
+
+	semanticCBStateGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "agentshield_semantic_cb_state",
+		Help: "Semantic circuit breaker state: 0=healthy 1=degraded 2=failing",
+	}, []string{"model"})
 )
 
 func cbStateValue(s string) float64 {
@@ -55,6 +65,17 @@ func cbStateValue(s string) float64 {
 	case "half-open":
 		return 1
 	default:
+		return 2
+	}
+}
+
+func sbStateValue(s SBState) float64 {
+	switch s {
+	case SBHealthy:
+		return 0
+	case SBDegraded:
+		return 1
+	default: // SBFailing
 		return 2
 	}
 }

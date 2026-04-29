@@ -79,6 +79,7 @@ hr{border:none;border-top:1px solid #1f2937;margin:12px 0}
     <div class="subtitle">Resilient LLM Agent — flowguard-powered</div>
   </div>
   <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+    <span id="degrade-badge" class="badge red" style="display:none">🧪 degrade ON</span>
     <span id="chaos-badge" class="badge gray" style="display:none">🎭 chaos running</span>
     <span id="ollama-badge" class="badge gray">checking...</span>
   </div>
@@ -132,12 +133,22 @@ hr{border:none;border-top:1px solid #1f2937;margin:12px 0}
 
     <!-- Demo tab -->
     <div class="tab-pane active" id="tab-demo">
-      <div class="label">Manual controls</div>
+      <div class="label">Transport failures</div>
       <div class="demo-grid">
         <button class="btn btn-red btn-sm" onclick="kill('primary')">💀 Kill Primary</button>
         <button class="btn btn-green btn-sm" onclick="restore('primary')">✅ Restore Primary</button>
         <button class="btn btn-red btn-sm" onclick="kill('fallback')">💀 Kill Fallback</button>
         <button class="btn btn-green btn-sm" onclick="restore('fallback')">✅ Restore Fallback</button>
+      </div>
+      <hr>
+      <div class="label">🧪 Semantic quality degradation</div>
+      <p style="font-size:11px;color:#6b7280;margin-bottom:8px">
+        Primary returns <b>HTTP 200</b> but with garbage quality — repetitive, hallucinated, or incoherent responses.
+        Watch the <b>semantic CB</b> open while transport CB stays closed.
+      </p>
+      <div class="demo-grid">
+        <button class="btn btn-sm" style="background:#7c3aed;color:#fff" onclick="enableDegrade()">🧪 Enable Degrade</button>
+        <button class="btn btn-green btn-sm" onclick="disableDegrade()">✅ Restore Quality</button>
       </div>
       <hr>
       <div class="label">Automated chaos scenario</div>
@@ -188,14 +199,28 @@ hr{border:none;border-top:1px solid #1f2937;margin:12px 0}
     <div class="chain">
       <div class="tier" id="tier-primary">
         <span class="tier-icon">🧠</span>
-        <div style="flex:1"><div class="tier-name">Primary — llama3.2</div><div class="tier-desc">Adaptive CB · retry 2x · hedge 1.5s</div></div>
-        <span id="cb-primary" class="badge green">closed</span>
+        <div style="flex:1">
+          <div class="tier-name">Primary — llama3.2</div>
+          <div class="tier-desc">Adaptive CB · retry 2x · hedge 1.5s · semantic CB</div>
+        </div>
+        <div style="display:flex;gap:4px;flex-direction:column;align-items:flex-end">
+          <span id="cb-primary" class="badge green" title="Transport circuit breaker">transport: closed</span>
+          <span id="sem-primary" class="badge green" title="Semantic quality circuit breaker">quality: healthy</span>
+          <span id="quality-primary" class="badge gray" title="Rolling quality score">q: —</span>
+        </div>
       </div>
-      <div style="padding:1px 0 1px 13px;color:#374151;font-size:10px">↓ circuit opens</div>
+      <div style="padding:1px 0 1px 13px;color:#374151;font-size:10px">↓ transport or semantic circuit opens</div>
       <div class="tier" id="tier-fallback">
         <span class="tier-icon">⚡</span>
-        <div style="flex:1"><div class="tier-name">Fallback — llama3.2:1b</div><div class="tier-desc">Classic CB · 3 failures</div></div>
-        <span id="cb-fallback" class="badge green">closed</span>
+        <div style="flex:1">
+          <div class="tier-name">Fallback — llama3.2:1b</div>
+          <div class="tier-desc">Classic CB · semantic CB</div>
+        </div>
+        <div style="display:flex;gap:4px;flex-direction:column;align-items:flex-end">
+          <span id="cb-fallback" class="badge green" title="Transport circuit breaker">transport: closed</span>
+          <span id="sem-fallback" class="badge green" title="Semantic quality circuit breaker">quality: healthy</span>
+          <span id="quality-fallback" class="badge gray" title="Rolling quality score">q: —</span>
+        </div>
       </div>
       <div style="padding:1px 0 1px 13px;color:#374151;font-size:10px">↓ circuit opens</div>
       <div class="tier" id="tier-cache">
@@ -503,13 +528,23 @@ async function startChaos(){
 async function kill(which){
   const url=which==='fallback'?'/demo/kill-fallback':'/demo/kill';
   await fetch(url,{method:'POST'});
-  log('💀 '+which+' killed','lw');
+  log('💀 '+which+' killed (transport)','lw');
   await refreshStatus();
 }
 async function restore(which){
   const url=which==='fallback'?'/demo/restore-fallback':'/demo/restore';
   await fetch(url,{method:'POST'});
   log('✅ '+which+' restored','');
+  await refreshStatus();
+}
+async function enableDegrade(){
+  await fetch('/demo/degrade',{method:'POST'});
+  log('🧪 Degrade mode ON — primary returns low-quality responses (HTTP 200 ✓)','lw');
+  await refreshStatus();
+}
+async function disableDegrade(){
+  await fetch('/demo/restore-quality',{method:'POST'});
+  log('✅ Quality restored — primary back to normal','');
   await refreshStatus();
 }
 
@@ -519,7 +554,21 @@ async function refreshStatus(){
     const s=await fetch('/status').then(r=>r.json());
     const pk=s.primary_killed?'killed':s.primary_breaker;
     const fk=s.fallback_killed?'killed':s.fallback_breaker;
-    setBadge('cb-primary',pk); setBadge('cb-fallback',fk);
+    setBadge('cb-primary','transport: '+pk);
+    document.getElementById('cb-primary').className='badge '+(cbColor[pk]||'gray');
+    setBadge('cb-fallback','transport: '+fk);
+    document.getElementById('cb-fallback').className='badge '+(cbColor[fk]||'gray');
+
+    // Semantic CB badges
+    const pSem = s.primary_semantic_cb||{};
+    const fSem = s.fallback_semantic_cb||{};
+    setSemBadge('sem-primary', pSem.state||'healthy', pSem.trip_reason);
+    setSemBadge('sem-fallback', fSem.state||'healthy', fSem.trip_reason);
+
+    // Quality score badges
+    setQualityBadge('quality-primary', pSem.avg_quality);
+    setQualityBadge('quality-fallback', fSem.avg_quality);
+
     document.getElementById('cache-size-badge').textContent=s.cache_size+' entries';
     document.getElementById('st-total').textContent=s.total_requests;
     document.getElementById('st-err').textContent=(s.error_rate*100).toFixed(0)+'%';
@@ -528,10 +577,29 @@ async function refreshStatus(){
     document.getElementById('st-sessions').textContent=s.active_sessions;
     document.getElementById('st-inflight').textContent=s.loadshed_inflight;
     document.getElementById('arch-shed').textContent=s.loadshed_limit;
-    const chaosB=document.getElementById('chaos-badge');
-    chaosB.style.display=s.chaos_running?'inline':'none';
+
+    document.getElementById('chaos-badge').style.display=s.chaos_running?'inline':'none';
+    document.getElementById('degrade-badge').style.display=s.degrade_mode?'inline':'none';
+
     addLinePoint(s.total_requests);
   }catch(_){}
+}
+
+function setSemBadge(id, state, reason){
+  const el=document.getElementById(id);
+  const labels={healthy:'quality: healthy', degraded:'quality: degraded', failing:'quality: OPEN'};
+  const cls={healthy:'green', degraded:'yellow', failing:'red'};
+  el.textContent=labels[state]||'quality: '+state;
+  el.className='badge '+(cls[state]||'gray');
+  el.title=reason||'';
+}
+
+function setQualityBadge(id, avg){
+  const el=document.getElementById(id);
+  if(avg==null||avg===undefined){el.textContent='q: —';el.className='badge gray';return;}
+  const pct=Math.round(avg*100);
+  el.textContent='q: '+pct+'%';
+  el.className='badge '+(pct>=70?'green':pct>=45?'yellow':'red');
 }
 
 function setBadge(id,state){
