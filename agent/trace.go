@@ -1,8 +1,4 @@
 // trace.go — per-request resilience trace.
-//
-// Every call to Ask() or React() creates a Trace that records exactly which
-// tiers were attempted, why each succeeded or failed, quality scores, and
-// latency per step. Stored in memory with 30-minute TTL.
 package agent
 
 import (
@@ -16,35 +12,35 @@ import (
 type TraceOutcome string
 
 const (
-	OutcomeSuccess          TraceOutcome = "success"
-	OutcomeTransportError   TraceOutcome = "transport_error"
-	OutcomeTransportCBOpen  TraceOutcome = "transport_cb_open"
-	OutcomeSemanticCBOpen   TraceOutcome = "semantic_cb_open"
-	OutcomeSemanticFailure  TraceOutcome = "semantic_failure"
-	OutcomeKilled           TraceOutcome = "killed"
-	OutcomeCacheHit         TraceOutcome = "cache_hit"
-	OutcomeGracefulDenial   TraceOutcome = "graceful_denial"
+	OutcomeSuccess         TraceOutcome = "success"
+	OutcomeTransportError  TraceOutcome = "transport_error"
+	OutcomeTransportCBOpen TraceOutcome = "transport_cb_open"
+	OutcomeSemanticCBOpen  TraceOutcome = "semantic_cb_open"
+	OutcomeSemanticFailure TraceOutcome = "semantic_failure"
+	OutcomeKilled          TraceOutcome = "killed"
+	OutcomeCacheHit        TraceOutcome = "cache_hit"
+	OutcomeGracefulDenial  TraceOutcome = "graceful_denial"
 )
 
 // TraceStep records one tier attempt within a request.
 type TraceStep struct {
-	Tier           Tier           `json:"tier"`
-	LatencyMS      int64          `json:"latency_ms"`
-	TransportCB    string         `json:"transport_cb"`
-	SemanticCB     string         `json:"semantic_cb"`
-	QualityScore   *float64       `json:"quality_score,omitempty"`
-	QualitySignals []string       `json:"quality_signals,omitempty"`
-	Outcome        TraceOutcome   `json:"outcome"`
+	Tier           Tier         `json:"tier"`
+	LatencyMS      int64        `json:"latency_ms"`
+	TransportCB    string       `json:"transport_cb"`
+	SemanticCB     string       `json:"semantic_cb"`
+	QualityScore   *float64     `json:"quality_score,omitempty"`
+	QualitySignals []string     `json:"quality_signals,omitempty"`
+	Outcome        TraceOutcome `json:"outcome"`
 }
 
 // Trace is the full record of a single request's resilience journey.
 type Trace struct {
-	ID        string       `json:"id"`
-	Prompt    string       `json:"prompt"`
-	TotalMS   int64        `json:"total_ms"`
-	FinalTier Tier         `json:"final_tier"`
-	Steps     []TraceStep  `json:"steps"`
-	CreatedAt time.Time    `json:"created_at"`
+	ID        string      `json:"id"`
+	Prompt    string      `json:"prompt"`
+	TotalMS   int64       `json:"total_ms"`
+	FinalTier Tier        `json:"final_tier"`
+	Steps     []TraceStep `json:"steps"`
+	CreatedAt time.Time   `json:"created_at"`
 
 	mu      sync.Mutex
 	startAt time.Time
@@ -74,19 +70,40 @@ func (t *Trace) finalize(tier Tier) {
 }
 
 // TraceStore holds traces in memory with TTL eviction.
+// Call Stop() to terminate the background cleanup goroutine.
 type TraceStore struct {
 	mu     sync.RWMutex
 	traces map[string]*Trace
 	ttl    time.Duration
+	done   chan struct{}
 }
 
 func newTraceStore() *TraceStore {
 	s := &TraceStore{
 		traces: make(map[string]*Trace),
 		ttl:    30 * time.Minute,
+		done:   make(chan struct{}),
 	}
 	go s.cleanup()
 	return s
+}
+
+// newTestTraceStore creates a TraceStore without the background cleanup goroutine.
+func newTestTraceStore() *TraceStore {
+	return &TraceStore{
+		traces: make(map[string]*Trace),
+		ttl:    30 * time.Minute,
+		done:   make(chan struct{}),
+	}
+}
+
+// Stop terminates the background cleanup goroutine.
+func (s *TraceStore) Stop() {
+	select {
+	case <-s.done:
+	default:
+		close(s.done)
+	}
 }
 
 func (s *TraceStore) New(prompt string) *Trace {
@@ -104,15 +121,22 @@ func (s *TraceStore) Get(id string) *Trace {
 }
 
 func (s *TraceStore) cleanup() {
-	for range time.Tick(5 * time.Minute) {
-		cutoff := time.Now().Add(-s.ttl)
-		s.mu.Lock()
-		for id, tr := range s.traces {
-			if tr.CreatedAt.Before(cutoff) {
-				delete(s.traces, id)
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-s.ttl)
+			s.mu.Lock()
+			for id, tr := range s.traces {
+				if tr.CreatedAt.Before(cutoff) {
+					delete(s.traces, id)
+				}
 			}
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 	}
 }
 

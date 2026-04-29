@@ -172,11 +172,21 @@ func New() *Agent {
 	return newAgent(url)
 }
 
-// NewWithOllamaURL creates an Agent pointed at a custom Ollama URL (for testing).
+// NewWithOllamaURL creates an Agent for testing — no background cleanup goroutines.
 func NewWithOllamaURL(url string) *Agent {
 	a := newAgent(url)
 	a.cache = newSemanticCache(10*time.Minute, nil)
+	// Replace stores with test variants that don't start background goroutines.
+	a.traces = newTestTraceStore()
+	a.sessions = NewTestSessionStore()
 	return a
+}
+
+// Stop terminates all background goroutines (cleanup tickers).
+// Call when the Agent is no longer needed.
+func (a *Agent) Stop() {
+	a.traces.Stop()
+	a.sessions.Stop()
 }
 
 // StartChaos runs the automated chaos scenario asynchronously.

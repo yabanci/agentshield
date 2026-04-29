@@ -27,9 +27,11 @@ type Session struct {
 }
 
 // SessionStore is an in-memory session store with TTL eviction.
+// Call Stop() to terminate the background cleanup goroutine.
 type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	done     chan struct{}
 }
 
 func newSessionStore() *SessionStore {
@@ -42,9 +44,19 @@ func NewTestSessionStore() *SessionStore {
 	return newSessionStoreInternal(false)
 }
 
+// Stop terminates the background cleanup goroutine.
+func (s *SessionStore) Stop() {
+	select {
+	case <-s.done:
+	default:
+		close(s.done)
+	}
+}
+
 func newSessionStoreInternal(startCleanup bool) *SessionStore {
 	s := &SessionStore{
 		sessions: make(map[string]*Session),
+		done:     make(chan struct{}),
 	}
 	if startCleanup {
 		go s.cleanup()
@@ -116,14 +128,21 @@ func (s *SessionStore) Count() int {
 }
 
 func (s *SessionStore) cleanup() {
-	for range time.Tick(sessionCleanup) {
-		s.mu.Lock()
-		cutoff := time.Now().Add(-sessionTTL)
-		for id, sess := range s.sessions {
-			if sess.LastUsed.Before(cutoff) {
-				delete(s.sessions, id)
+	ticker := time.NewTicker(sessionCleanup)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-sessionTTL)
+			s.mu.Lock()
+			for id, sess := range s.sessions {
+				if sess.LastUsed.Before(cutoff) {
+					delete(s.sessions, id)
+				}
 			}
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 	}
 }

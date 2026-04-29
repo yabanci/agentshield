@@ -27,6 +27,7 @@ type ReactResponse struct {
 	Tier      Tier        `json:"tier"`
 	Turns     int         `json:"turns"`
 	SessionID string      `json:"session_id,omitempty"`
+	TraceID   string      `json:"trace_id,omitempty"`
 }
 
 // React runs the ReAct (Reason + Act) agent loop.
@@ -45,15 +46,28 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 	var steps []ReactStep
 	lastTier := TierPrimary
 	conversationCtx := fullPrompt
-	tr := a.traces.New(prompt) // React has its own trace
+	tr := a.traces.New(prompt)
 
-	// Record user message
+	// done wraps every return path: finalizes the trace and sets TraceID.
+	done := func(answer string, turns int, tier Tier) ReactResponse {
+		a.sessions.Add(sessionID, Message{Role: "assistant", Content: answer, Tier: tier, At: nowFn()})
+		tr.finalize(tier)
+		return ReactResponse{
+			Answer:    answer,
+			Steps:     steps,
+			Tier:      tier,
+			Turns:     turns,
+			SessionID: sessionID,
+			TraceID:   tr.ID,
+		}
+	}
+
 	a.sessions.Add(sessionID, Message{Role: "user", Content: prompt, At: nowFn()})
 
 	for i := 0; i < maxReactIterations; i++ {
-		// LLM call through the resilience chain
 		resp, err := a.degrade(ctx, conversationCtx, tr)
 		if err != nil {
+			tr.finalize(TierDegraded)
 			return ReactResponse{}, fmt.Errorf("react llm call failed: %w", err)
 		}
 		lastTier = resp.Tier
@@ -61,33 +75,16 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 
 		step, err := parseReactStep(raw, i+1)
 		if err != nil {
-			// LLM gave unparseable output — treat as final answer
 			steps = append(steps, ReactStep{Iteration: i + 1, Answer: raw})
-			a.sessions.Add(sessionID, Message{Role: "assistant", Content: raw, Tier: lastTier, At: nowFn()})
-			return ReactResponse{
-				Answer:    raw,
-				Steps:     steps,
-				Tier:      lastTier,
-				Turns:     i + 1,
-				SessionID: sessionID,
-			}, nil
+			return done(raw, i+1, lastTier), nil
 		}
 
 		steps = append(steps, step)
 
-		// Final answer — done
 		if step.Answer != "" {
-			a.sessions.Add(sessionID, Message{Role: "assistant", Content: step.Answer, Tier: lastTier, At: nowFn()})
-			return ReactResponse{
-				Answer:    step.Answer,
-				Steps:     steps,
-				Tier:      lastTier,
-				Turns:     i + 1,
-				SessionID: sessionID,
-			}, nil
+			return done(step.Answer, i+1, lastTier), nil
 		}
 
-		// Tool call
 		if step.Action != "" {
 			obs, toolErr := tools.Execute(ctx, step.Action, step.ActionInput)
 			if toolErr != nil {
@@ -95,8 +92,6 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 			}
 			step.Observation = obs
 			steps[len(steps)-1].Observation = obs
-
-			// Append to conversation context
 			conversationCtx += fmt.Sprintf(
 				"Thought: %s\nAction: %s\nActionInput: %s\nObservation: %s\n",
 				step.Thought, step.Action, marshalArgs(step.ActionInput), obs,
@@ -104,23 +99,15 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 			continue
 		}
 
-		// Neither answer nor action — force finish
 		steps = append(steps, ReactStep{Iteration: i + 2, Answer: raw})
-		a.sessions.Add(sessionID, Message{Role: "assistant", Content: raw, Tier: lastTier, At: nowFn()})
-		return ReactResponse{
-			Answer: raw, Steps: steps, Tier: lastTier, Turns: i + 1, SessionID: sessionID,
-		}, nil
+		return done(raw, i+1, lastTier), nil
 	}
 
-	// Max iterations hit — return last thought as answer
 	last := "I was unable to complete the reasoning chain within the allowed iterations."
 	if len(steps) > 0 && steps[len(steps)-1].Thought != "" {
 		last = steps[len(steps)-1].Thought
 	}
-	a.sessions.Add(sessionID, Message{Role: "assistant", Content: last, Tier: lastTier, At: nowFn()})
-	return ReactResponse{
-		Answer: last, Steps: steps, Tier: lastTier, Turns: maxReactIterations, SessionID: sessionID,
-	}, nil
+	return done(last, maxReactIterations, lastTier), nil
 }
 
 // parseReactStep parses one LLM output into a ReactStep.

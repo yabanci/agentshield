@@ -24,6 +24,14 @@ var chaosPrompts = []string{
 	"What time is it in UTC?",
 }
 
+// sleep pauses for d, or returns early if ctx is cancelled.
+func sleep(ctx context.Context, d time.Duration) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(d):
+	}
+}
+
 // RunChaos executes the scripted failure scenario and sends events to ch.
 // The caller must drain ch and close it when done.
 func (a *Agent) RunChaos(ctx context.Context, ch chan<- ChaosEvent) {
@@ -66,55 +74,55 @@ func (a *Agent) RunChaos(ctx context.Context, ch chan<- ChaosEvent) {
 
 	// ── Phase 0: baseline ──────────────────────────────────────────────
 	log("🎬 Phase 1 — Baseline: all systems nominal")
-	time.Sleep(500 * time.Millisecond)
+	sleep(ctx, 500 * time.Millisecond)
 
 	for _, p := range chaosPrompts[:2] {
 		send(p)
-		time.Sleep(300 * time.Millisecond)
+		sleep(ctx, 300 * time.Millisecond)
 	}
 
 	// ── Phase 1: kill primary ──────────────────────────────────────────
-	time.Sleep(800 * time.Millisecond)
+	sleep(ctx, 800 * time.Millisecond)
 	log("💀 Phase 2 — Killing primary model (llama3.2)...")
 	emit("action", "kill_primary", "", 0)
 	a.KillPrimary()
-	time.Sleep(500 * time.Millisecond)
+	sleep(ctx, 500 * time.Millisecond)
 
 	log("📡 Sending requests — circuit breaker should route to fallback")
 	for _, p := range chaosPrompts[:2] {
 		send(p)
-		time.Sleep(300 * time.Millisecond)
+		sleep(ctx, 300 * time.Millisecond)
 	}
 
 	// ── Phase 2: kill fallback ─────────────────────────────────────────
-	time.Sleep(800 * time.Millisecond)
+	sleep(ctx, 800 * time.Millisecond)
 	log("💀 Phase 3 — Killing fallback model (llama3.2:1b)...")
 	emit("action", "kill_fallback", "", 0)
 	a.KillFallback()
-	time.Sleep(500 * time.Millisecond)
+	sleep(ctx, 500 * time.Millisecond)
 
 	log("📡 Both models down — sending cached and uncached prompts")
 	// chaosPrompts[2] is same as [0] → should hit semantic cache
 	send(chaosPrompts[2])
-	time.Sleep(300 * time.Millisecond)
+	sleep(ctx, 300 * time.Millisecond)
 	// chaosPrompts[3] is new → graceful denial
 	send(chaosPrompts[3])
 
 	// ── Phase 3: restore primary ───────────────────────────────────────
-	time.Sleep(800 * time.Millisecond)
+	sleep(ctx, 800 * time.Millisecond)
 	log("✅ Phase 4 — Restoring primary model...")
 	emit("action", "restore_primary", "", 0)
 	a.RestorePrimary()
-	time.Sleep(500 * time.Millisecond)
+	sleep(ctx, 500 * time.Millisecond)
 
 	log("📡 Primary back — verifying auto-recovery")
 	for _, p := range chaosPrompts[:2] {
 		send(p)
-		time.Sleep(300 * time.Millisecond)
+		sleep(ctx, 300 * time.Millisecond)
 	}
 
 	// ── Phase 4: full restore ──────────────────────────────────────────
-	time.Sleep(500 * time.Millisecond)
+	sleep(ctx, 500 * time.Millisecond)
 	emit("action", "restore_fallback", "", 0)
 	a.RestoreFallback()
 	log("✅ Phase 5 — All systems restored. Chaos demo complete.")
