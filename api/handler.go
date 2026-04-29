@@ -57,6 +57,14 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /demo/degrade", h.enableDegrade)
 	mux.HandleFunc("POST /demo/restore-quality", h.disableDegrade)
 
+	// Trace
+	mux.HandleFunc("GET /trace/{id}", h.getTrace)
+
+	// Webhook config
+	mux.HandleFunc("POST /config/webhook", h.setWebhook)
+	mux.HandleFunc("GET /config/webhook", h.getWebhook)
+	mux.HandleFunc("DELETE /config/webhook", h.clearWebhook)
+
 	// Dashboard
 	mux.HandleFunc("GET /", h.dashboard)
 }
@@ -110,21 +118,21 @@ func (h *Handler) chatStream(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
-	tokens := make(chan string, 64)
+	out := make(chan agent.StreamToken, 64)
 	var tier agent.Tier
 
 	go func() {
-		defer close(tokens)
-		tier, _ = h.agent.StreamPrimary(ctx, prompt, tokens)
+		defer close(out)
+		tier, _ = h.agent.StreamWithQualityGate(ctx, prompt, out)
 	}()
 
-	for token := range tokens {
-		data, _ := json.Marshal(map[string]any{"token": token, "done": false})
+	for st := range out {
+		data, _ := json.Marshal(st)
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	}
 
-	done, _ := json.Marshal(map[string]any{"done": true, "tier": string(tier)})
+	done, _ := json.Marshal(agent.StreamToken{Done: true, Tier: tier})
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", done)
 	flusher.Flush()
 }
@@ -272,6 +280,42 @@ func (h *Handler) chaosStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── Dashboard ─────────────────────────────────────────────────────────────
+
+func (h *Handler) getTrace(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	tr := h.agent.GetTrace(id)
+	if tr == nil {
+		jsonError(w, "trace not found", http.StatusNotFound)
+		return
+	}
+	jsonOK(w, tr)
+}
+
+func (h *Handler) setWebhook(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.URL == "" {
+		jsonError(w, "url is required", http.StatusBadRequest)
+		return
+	}
+	h.agent.SetWebhookURL(body.URL)
+	jsonOK(w, map[string]string{"result": "webhook configured", "url": body.URL})
+}
+
+func (h *Handler) getWebhook(w http.ResponseWriter, r *http.Request) {
+	url := h.agent.WebhookURL()
+	if url == "" {
+		jsonOK(w, map[string]any{"configured": false})
+		return
+	}
+	jsonOK(w, map[string]any{"configured": true, "url": url})
+}
+
+func (h *Handler) clearWebhook(w http.ResponseWriter, r *http.Request) {
+	h.agent.ClearWebhookURL()
+	jsonOK(w, map[string]string{"result": "webhook cleared"})
+}
 
 func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

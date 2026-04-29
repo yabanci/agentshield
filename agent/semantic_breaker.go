@@ -12,9 +12,14 @@ package agent
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
+
+// StateChangeFunc is called when the breaker transitions between states.
+// reason and avgQuality are captured under the lock at transition time.
+type StateChangeFunc func(prev, next SBState, reason string, avgQuality float64)
 
 // SBState is the state of a SemanticBreaker.
 type SBState string
@@ -44,6 +49,17 @@ var DefaultSBConfig = SemanticBreakerConfig{
 	RecoverySamples:   2,
 }
 
+// CalibrationInfo describes the result of adaptive threshold learning.
+type CalibrationInfo struct {
+	Calibrated       bool    `json:"calibrated"`
+	SamplesCollected int     `json:"samples_collected"`
+	SamplesNeeded    int     `json:"samples_needed"`
+	BaselineMean     float64 `json:"baseline_mean,omitempty"`
+	BaselineStd      float64 `json:"baseline_std,omitempty"`
+	LearnedDegraded  float64 `json:"learned_degraded,omitempty"`
+	LearnedFailing   float64 `json:"learned_failing,omitempty"`
+}
+
 // SemanticBreaker tracks quality scores and blocks routing when quality
 // consistently falls below threshold.
 type SemanticBreaker struct {
@@ -57,18 +73,49 @@ type SemanticBreaker struct {
 	openAt          time.Time
 	consecutiveGood int
 
+	// Adaptive calibration — learns thresholds from first N observations.
+	calibSamples []float64
+	calibN       int
+	calibration  CalibrationInfo
+
 	// last evaluation detail for observability (lock-protected)
 	lastResult QualityResult
 	TripReason string
+
+	// onStateChange fires when the breaker transitions between states.
+	onStateChange StateChangeFunc
 }
 
 // NewSemanticBreaker creates a breaker with the given config.
+// calibN controls how many observations to collect before auto-calibrating
+// thresholds (0 = disabled, use cfg thresholds as-is).
 func NewSemanticBreaker(cfg SemanticBreakerConfig) *SemanticBreaker {
 	return &SemanticBreaker{
 		cfg:    cfg,
 		scores: make([]float64, cfg.WindowSize),
 		state:  SBHealthy,
+		calibN: 20, // collect 20 healthy samples before calibrating
+		calibration: CalibrationInfo{
+			SamplesNeeded: 20,
+		},
 	}
+}
+
+// NewSemanticBreakerWithCalibN creates a breaker with a custom calibration sample count.
+// Primarily for testing; production code uses NewSemanticBreaker.
+func NewSemanticBreakerWithCalibN(cfg SemanticBreakerConfig, calibN int) *SemanticBreaker {
+	sb := NewSemanticBreaker(cfg)
+	sb.calibN = calibN
+	sb.calibration.SamplesNeeded = calibN
+	return sb
+}
+
+// WithStateChangeCallback attaches a callback fired on every state transition.
+func (sb *SemanticBreaker) WithStateChangeCallback(fn StateChangeFunc) *SemanticBreaker {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	sb.onStateChange = fn
+	return sb
 }
 
 // Record registers a new quality score and updates state.
@@ -78,14 +125,75 @@ func (sb *SemanticBreaker) Record(score float64, result QualityResult) SBState {
 	defer sb.mu.Unlock()
 
 	sb.lastResult = result
+
+	// Adaptive calibration: collect healthy-looking scores before calibrating.
+	if !sb.calibration.Calibrated && sb.calibN > 0 {
+		sb.calibSamples = append(sb.calibSamples, score)
+		sb.calibration.SamplesCollected = len(sb.calibSamples)
+		if len(sb.calibSamples) >= sb.calibN {
+			sb.calibrate()
+		}
+	}
+
 	sb.scores[sb.idx] = score
 	sb.idx = (sb.idx + 1) % sb.cfg.WindowSize
 	if sb.idx == 0 {
 		sb.filled = true
 	}
 
+	prev := sb.state
 	sb.updateState(score)
+	if sb.state != prev && sb.onStateChange != nil {
+		fn := sb.onStateChange
+		p, n := prev, sb.state
+		// Capture all values under the lock before launching goroutine.
+		reason := sb.TripReason
+		samples := sb.cfg.WindowSize
+		if !sb.filled {
+			samples = sb.idx
+		}
+		avg := 1.0
+		if samples > 0 {
+			avg = sb.rollingAvg(samples)
+		}
+		go fn(p, n, reason, avg)
+	}
 	return sb.state
+}
+
+// calibrate computes adaptive thresholds from the calibration sample window.
+// Must be called with lock held.
+func (sb *SemanticBreaker) calibrate() {
+	n := float64(len(sb.calibSamples))
+	mean := 0.0
+	for _, s := range sb.calibSamples {
+		mean += s
+	}
+	mean /= n
+
+	variance := 0.0
+	for _, s := range sb.calibSamples {
+		d := s - mean
+		variance += d * d
+	}
+	variance /= n
+	std := math.Sqrt(variance)
+
+	// Thresholds: mean ± 1σ and mean ± 2σ, floored to sane minimums.
+	degraded := math.Max(0.40, mean-1.0*std)
+	failing := math.Max(0.20, mean-2.0*std)
+
+	sb.cfg.DegradedThreshold = degraded
+	sb.cfg.FailingThreshold = failing
+	sb.calibration = CalibrationInfo{
+		Calibrated:       true,
+		SamplesCollected: len(sb.calibSamples),
+		SamplesNeeded:    sb.calibN,
+		BaselineMean:     mean,
+		BaselineStd:      std,
+		LearnedDegraded:  degraded,
+		LearnedFailing:   failing,
+	}
 }
 
 func (sb *SemanticBreaker) updateState(latestScore float64) {
@@ -186,9 +294,10 @@ func (sb *SemanticBreaker) rollingAvg(samples int) float64 {
 
 // SBSnapshot is an atomic observability snapshot of a SemanticBreaker.
 type SBSnapshot struct {
-	State      SBState `json:"state"`
-	AvgQuality float64 `json:"avg_quality"`
-	TripReason string  `json:"trip_reason,omitempty"`
+	State       SBState         `json:"state"`
+	AvgQuality  float64         `json:"avg_quality"`
+	TripReason  string          `json:"trip_reason,omitempty"`
+	Calibration CalibrationInfo `json:"calibration"`
 }
 
 // Snapshot returns a consistent, atomic snapshot (single lock acquisition).
@@ -206,8 +315,9 @@ func (sb *SemanticBreaker) Snapshot() SBSnapshot {
 	}
 
 	return SBSnapshot{
-		State:      sb.state,
-		AvgQuality: avg,
-		TripReason: sb.TripReason,
+		State:       sb.state,
+		AvgQuality:  avg,
+		TripReason:  sb.TripReason,
+		Calibration: sb.calibration,
 	}
 }

@@ -112,6 +112,7 @@ hr{border:none;border-top:1px solid #1f2937;margin:12px 0}
         <span id="tier-badge" class="badge"></span>
         <span id="cached-badge" class="badge yellow" style="display:none">cached</span>
         <span id="turns-badge" class="badge gray" style="display:none"></span>
+        <span id="trace-badge" style="display:none;font-size:11px"></span>
       </div>
       <div class="resp" id="resp-box">Response will appear here...</div>
     </div>
@@ -207,6 +208,7 @@ hr{border:none;border-top:1px solid #1f2937;margin:12px 0}
           <span id="cb-primary" class="badge green" title="Transport circuit breaker">transport: closed</span>
           <span id="sem-primary" class="badge green" title="Semantic quality circuit breaker">quality: healthy</span>
           <span id="quality-primary" class="badge gray" title="Rolling quality score">q: —</span>
+          <span id="calib-primary" class="badge gray" title="Adaptive calibration status">calibrating…</span>
         </div>
       </div>
       <div style="padding:1px 0 1px 13px;color:#374151;font-size:10px">↓ transport or semantic circuit opens</div>
@@ -220,6 +222,7 @@ hr{border:none;border-top:1px solid #1f2937;margin:12px 0}
           <span id="cb-fallback" class="badge green" title="Transport circuit breaker">transport: closed</span>
           <span id="sem-fallback" class="badge green" title="Semantic quality circuit breaker">quality: healthy</span>
           <span id="quality-fallback" class="badge gray" title="Rolling quality score">q: —</span>
+          <span id="calib-fallback" class="badge gray" title="Adaptive calibration status">calibrating…</span>
         </div>
       </div>
       <div style="padding:1px 0 1px 13px;color:#374151;font-size:10px">↓ circuit opens</div>
@@ -382,9 +385,10 @@ async function doChat(prompt){
   try{
     const data = await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})}).then(r=>r.json());
     document.getElementById('resp-box').textContent=data.text;
-    showTier(data.tier,data.cached);
+    showTier(data.tier,data.cached,0,data.trace_id);
     tierCounts[data.tier]=(tierCounts[data.tier]||0)+1; updateDonut();
-    log('← '+tierEmoji(data.tier)+' '+data.tier+(data.cached?' (cached)':''), logClass(data.tier));
+    const traceLink = data.trace_id ? ' [<a href="/trace/'+data.trace_id+'" target="_blank" style="color:#93c5fd;text-decoration:none">trace↗</a>]' : '';
+    document.getElementById('log').innerHTML='<div class="le '+logClass(data.tier)+'">['+new Date().toLocaleTimeString()+'] ← '+tierEmoji(data.tier)+' '+data.tier+(data.cached?' (cached)':'')+traceLink+'</div>'+document.getElementById('log').innerHTML;
   }catch(e){
     document.getElementById('resp-box').textContent='Error: '+e.message;
     log('✗ '+e.message,'le2');
@@ -569,6 +573,10 @@ async function refreshStatus(){
     setQualityBadge('quality-primary', pSem.avg_quality);
     setQualityBadge('quality-fallback', fSem.avg_quality);
 
+    // Calibration status
+    updateCalibBadge('calib-primary', pSem.calibration);
+    updateCalibBadge('calib-fallback', fSem.calibration);
+
     document.getElementById('cache-size-badge').textContent=s.cache_size+' entries';
     document.getElementById('st-total').textContent=s.total_requests;
     document.getElementById('st-err').textContent=(s.error_rate*100).toFixed(0)+'%';
@@ -594,6 +602,21 @@ function setSemBadge(id, state, reason){
   el.title=reason||'';
 }
 
+function updateCalibBadge(id, calib){
+  const el=document.getElementById(id);
+  if(!calib){return;}
+  if(calib.calibrated){
+    const mean=Math.round(calib.baseline_mean*100);
+    const std=Math.round(calib.baseline_std*100);
+    el.textContent='✓ calibrated '+mean+'%±'+std+'%';
+    el.className='badge green';
+    el.title='Baseline: '+mean+'% ± '+std+'% | Thresholds: degraded<'+Math.round(calib.learned_degraded*100)+'%, failing<'+Math.round(calib.learned_failing*100)+'%';
+  } else {
+    el.textContent='calibrating '+calib.samples_collected+'/'+calib.samples_needed;
+    el.className='badge gray';
+  }
+}
+
 function setQualityBadge(id, avg){
   const el=document.getElementById(id);
   if(avg==null||avg===undefined){el.textContent='q: —';el.className='badge gray';return;}
@@ -615,7 +638,7 @@ async function checkOllama(){
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
-function showTier(tier,cached,turns){
+function showTier(tier,cached,turns,traceId){
   document.getElementById('resp-meta').style.display='flex';
   const tb=document.getElementById('tier-badge');
   tb.textContent=tier; tb.className='badge '+(tierColor[tier]||'gray');
@@ -623,6 +646,11 @@ function showTier(tier,cached,turns){
   const turnsB=document.getElementById('turns-badge');
   if(turns){turnsB.textContent=turns+' turns';turnsB.style.display='inline';}
   else turnsB.style.display='none';
+  const traceB=document.getElementById('trace-badge');
+  if(traceId && traceB){
+    traceB.innerHTML='<a href="/trace/'+traceId+'" target="_blank" style="color:#93c5fd;text-decoration:none">📋 trace</a>';
+    traceB.style.display='inline';
+  } else if(traceB) traceB.style.display='none';
 }
 function tierEmoji(t){return{primary:'🧠',fallback:'⚡',cache:'💾',degraded:'🔕'}[t]||'?';}
 function logClass(t){return t==='degraded'?'le2':t!=='primary'?'lw':'';}

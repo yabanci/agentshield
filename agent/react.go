@@ -45,13 +45,14 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 	var steps []ReactStep
 	lastTier := TierPrimary
 	conversationCtx := fullPrompt
+	tr := a.traces.New(prompt) // React has its own trace
 
 	// Record user message
 	a.sessions.Add(sessionID, Message{Role: "user", Content: prompt, At: nowFn()})
 
 	for i := 0; i < maxReactIterations; i++ {
 		// LLM call through the resilience chain
-		resp, err := a.degrade(ctx, conversationCtx)
+		resp, err := a.degrade(ctx, conversationCtx, tr)
 		if err != nil {
 			return ReactResponse{}, fmt.Errorf("react llm call failed: %w", err)
 		}

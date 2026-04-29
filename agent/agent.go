@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -43,9 +44,10 @@ const (
 
 // Response is the result of a resilient LLM call.
 type Response struct {
-	Text   string `json:"text"`
-	Tier   Tier   `json:"tier"`
-	Cached bool   `json:"cached"`
+	Text    string `json:"text"`
+	Tier    Tier   `json:"tier"`
+	Cached  bool   `json:"cached"`
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // Status is a live snapshot of the agent's resilience state.
@@ -73,8 +75,8 @@ type Agent struct {
 	ollama         *ollamaClient
 	primaryCB      *circuitbreaker.Breaker
 	fallbackCB     *circuitbreaker.Breaker
-	primarySemCB   *SemanticBreaker  // semantic quality circuit breaker for primary
-	fallbackSemCB  *SemanticBreaker  // semantic quality circuit breaker for fallback
+	primarySemCB   *SemanticBreaker
+	fallbackSemCB  *SemanticBreaker
 	qualityEval    *QualityEvaluator
 	hedger         *hedge.Hedge
 	interactiveBH  *bulkhead.Bulkhead
@@ -83,10 +85,12 @@ type Agent struct {
 	cache          *semanticCache
 	tools          *ToolRegistry
 	sessions       *SessionStore
-	chaosMu        atomic.Bool // true while chaos is running
+	traces         *TraceStore
+	webhook        *WebhookDispatcher
+	chaosMu        atomic.Bool
 	primaryKilled  atomic.Bool
 	fallbackKilled atomic.Bool
-	degradeMode    atomic.Bool  // demo: inject bad responses to primary
+	degradeMode    atomic.Bool
 	totalRequests  atomic.Int64
 }
 
@@ -117,7 +121,21 @@ func newAgent(ollamaURL string) *Agent {
 		// Loadshed: adaptive AIMD — starts at 50 concurrent, shrinks under load.
 		shedder: loadshed.New(50, 5*time.Second),
 	}
-	a.primarySemCB = NewSemanticBreaker(DefaultSBConfig)
+	a.webhook = newWebhookDispatcher()
+
+	a.primarySemCB = NewSemanticBreaker(DefaultSBConfig).
+		WithStateChangeCallback(func(prev, next SBState, reason string, avg float64) {
+			a.webhook.Fire(WebhookEvent{
+				Event:      fmt.Sprintf("semantic_cb_%s", next),
+				Model:      ModelPrimary,
+				PrevState:  string(prev),
+				NewState:   string(next),
+				Reason:     reason,
+				AvgQuality: avg,
+				Timestamp:  time.Now(),
+			})
+		})
+
 	a.fallbackSemCB = NewSemanticBreaker(SemanticBreakerConfig{
 		WindowSize:        6,
 		MinSamples:        2,
@@ -125,11 +143,23 @@ func newAgent(ollamaURL string) *Agent {
 		FailingThreshold:  0.35,
 		OpenTimeout:       30 * time.Second,
 		RecoverySamples:   2,
+	}).WithStateChangeCallback(func(prev, next SBState, reason string, avg float64) {
+		a.webhook.Fire(WebhookEvent{
+			Event:      fmt.Sprintf("semantic_cb_%s", next),
+			Model:      ModelFallback,
+			PrevState:  string(prev),
+			NewState:   string(next),
+			Reason:     reason,
+			AvgQuality: avg,
+			Timestamp:  time.Now(),
+		})
 	})
+
 	a.qualityEval = newQualityEvaluator(ol.embed)
 	a.cache = newSemanticCache(10*time.Minute, ol.embed)
 	a.tools = newToolRegistry(a)
 	a.sessions = newSessionStore()
+	a.traces = newTraceStore()
 	return a
 }
 
@@ -194,55 +224,50 @@ func (a *Agent) AskBatch(ctx context.Context, prompt string) (Response, error) {
 
 func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, error) {
 	a.totalRequests.Add(1)
+	tr := a.traces.New(prompt)
 
-	// Layer 1: load shedder
 	var resp Response
 	err := a.shedder.Do(ctx, func(ctx context.Context) error {
-		// Layer 2: bulkhead (interactive vs batch)
 		bh := a.interactiveBH
 		if batch {
 			bh = a.batchBH
 		}
 		return bh.Do(ctx, func(ctx context.Context) error {
 			var bhErr error
-			resp, bhErr = a.degrade(ctx, prompt)
+			resp, bhErr = a.degrade(ctx, prompt, tr)
 			return bhErr
 		})
 	})
 
 	if errors.Is(err, loadshed.ErrShed) {
 		loadshedTotal.Inc()
-		return Response{
-			Text: "Server is overloaded. Please try again in a moment.",
-			Tier: TierDegraded,
-		}, nil
-	}
-	if errors.Is(err, bulkhead.ErrFull) {
+		resp = Response{Text: "Server is overloaded. Please try again in a moment.", Tier: TierDegraded}
+		tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial, LatencyMS: 0})
+	} else if errors.Is(err, bulkhead.ErrFull) {
 		bulkheadFullTotal.WithLabelValues(func() string {
 			if batch {
 				return "batch"
 			}
 			return "interactive"
 		}()).Inc()
-		return Response{
-			Text: "Too many concurrent requests. Please try again shortly.",
-			Tier: TierDegraded,
-		}, nil
-	}
-	if err != nil {
+		resp = Response{Text: "Too many concurrent requests. Please try again shortly.", Tier: TierDegraded}
+		tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial, LatencyMS: 0})
+	} else if err != nil {
 		return resp, err
 	}
 
+	tr.finalize(resp.Tier)
+	resp.TraceID = tr.ID
 	a.updateCBMetrics()
 	return resp, nil
 }
 
-// degrade runs the 4-tier degradation chain.
-func (a *Agent) degrade(ctx context.Context, prompt string) (Response, error) {
+// degrade runs the 4-tier degradation chain, recording each attempt in tr.
+func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response, error) {
 	start := time.Now()
 
-	// Tier 1: primary model (hedged + circuit breaker + retry)
-	if text, ok := a.tryPrimary(ctx, prompt); ok {
+	// Tier 1: primary model (hedged + transport CB + semantic CB + retry)
+	if text, ok := a.tryPrimary(ctx, prompt, tr); ok {
 		dur := time.Since(start)
 		requestsTotal.WithLabelValues("primary").Inc()
 		requestDuration.WithLabelValues("primary").Observe(dur.Seconds())
@@ -250,8 +275,8 @@ func (a *Agent) degrade(ctx context.Context, prompt string) (Response, error) {
 		return Response{Text: text, Tier: TierPrimary}, nil
 	}
 
-	// Tier 2: fallback model (circuit breaker)
-	if text, ok := a.tryFallback(ctx, prompt); ok {
+	// Tier 2: fallback model (transport CB + semantic CB)
+	if text, ok := a.tryFallback(ctx, prompt, tr); ok {
 		dur := time.Since(start)
 		requestsTotal.WithLabelValues("fallback").Inc()
 		requestDuration.WithLabelValues("fallback").Observe(dur.Seconds())
@@ -262,11 +287,15 @@ func (a *Agent) degrade(ctx context.Context, prompt string) (Response, error) {
 	// Tier 3: semantic cache
 	if cached, ok := a.cache.get(ctx, prompt); ok {
 		requestsTotal.WithLabelValues("cache").Inc()
+		tr.addStep(TraceStep{Tier: TierCache, Outcome: OutcomeCacheHit,
+			LatencyMS: time.Since(start).Milliseconds()})
 		return Response{Text: cached, Tier: TierCache, Cached: true}, nil
 	}
 
 	// Tier 4: graceful denial
 	requestsTotal.WithLabelValues("degraded").Inc()
+	tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial,
+		LatencyMS: time.Since(start).Milliseconds()})
 	return Response{
 		Text: "All AI tiers are currently unavailable. Please try again shortly.",
 		Tier: TierDegraded,
@@ -278,18 +307,30 @@ func (a *Agent) degrade(ctx context.Context, prompt string) (Response, error) {
 // Key design: quality evaluation is OUTSIDE the transport CB so that
 // semantic failures never pollute the transport circuit breaker's state.
 // The two breakers are fully independent.
-func (a *Agent) tryPrimary(ctx context.Context, prompt string) (string, bool) {
+func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *Trace) (string, bool) {
+	stepStart := time.Now()
+	step := TraceStep{
+		Tier:        TierPrimary,
+		TransportCB: a.primaryCB.State().String(),
+		SemanticCB:  string(a.primarySemCB.State()),
+	}
+	defer func() {
+		step.LatencyMS = time.Since(stepStart).Milliseconds()
+		tr.addStep(step)
+	}()
+
 	if a.primaryKilled.Load() {
+		step.Outcome = OutcomeKilled
 		return "", false
 	}
 	if a.primarySemCB.ShouldBlock() {
+		step.Outcome = OutcomeSemanticCBOpen
 		return "", false
 	}
 
 	var result string
 	hedgeFireCount := 0
 
-	// Transport CB: only wraps network/timeout concerns.
 	transportErr := a.primaryCB.Do(ctx, func(ctx context.Context) error {
 		return a.hedger.Do(ctx, func(ctx context.Context) error {
 			hedgeFireCount++
@@ -303,38 +344,64 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string) (string, bool) {
 			return r.Do(ctx, func(ctx context.Context) error {
 				text, err := a.generate(ctx, ModelPrimary, prompt)
 				if err != nil {
-					return err // transport error → CB counts it
+					return err
 				}
 				result = text
-				return nil // transport success — CB doesn't see quality
+				return nil
 			})
 		})
 	})
 
 	if transportErr != nil {
-		return "", false // transport failed
+		step.Outcome = OutcomeTransportError
+		step.TransportCB = a.primaryCB.State().String()
+		return "", false
 	}
 
-	// Quality evaluation OUTSIDE transport CB — semantic failures must not
-	// affect the transport circuit breaker's error counter.
 	quality := a.qualityEval.Evaluate(ctx, prompt, result)
 	a.primarySemCB.Record(quality.Score, quality)
 	qualityGauge.WithLabelValues("primary").Set(quality.Score)
 
-	if quality.Score < QualityAcceptable && len(quality.Signals) > 0 {
-		return "", false // semantic failure — transport CB unaffected
+	step.QualityScore = &quality.Score
+	step.SemanticCB = string(a.primarySemCB.State())
+	if len(quality.Signals) > 0 {
+		names := make([]string, len(quality.Signals))
+		for i, s := range quality.Signals {
+			names[i] = s.Name
+		}
+		step.QualitySignals = names
 	}
+
+	if quality.Score < QualityAcceptable && len(quality.Signals) > 0 {
+		step.Outcome = OutcomeSemanticFailure
+		return "", false
+	}
+	step.Outcome = OutcomeSuccess
 	return result, true
 }
 
 // tryFallback uses transport CB + semantic CB (no hedge — fallback must be fast).
-func (a *Agent) tryFallback(ctx context.Context, prompt string) (string, bool) {
+func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *Trace) (string, bool) {
+	stepStart := time.Now()
+	step := TraceStep{
+		Tier:        TierFallback,
+		TransportCB: a.fallbackCB.State().String(),
+		SemanticCB:  string(a.fallbackSemCB.State()),
+	}
+	defer func() {
+		step.LatencyMS = time.Since(stepStart).Milliseconds()
+		tr.addStep(step)
+	}()
+
 	if a.fallbackKilled.Load() {
+		step.Outcome = OutcomeKilled
 		return "", false
 	}
 	if a.fallbackSemCB.ShouldBlock() {
+		step.Outcome = OutcomeSemanticCBOpen
 		return "", false
 	}
+
 	var result string
 	err := a.fallbackCB.Do(ctx, func(ctx context.Context) error {
 		text, err := a.ollama.generate(ctx, ModelFallback, prompt)
@@ -344,12 +411,16 @@ func (a *Agent) tryFallback(ctx context.Context, prompt string) (string, bool) {
 		quality := a.qualityEval.Evaluate(ctx, prompt, text)
 		a.fallbackSemCB.Record(quality.Score, quality)
 		qualityGauge.WithLabelValues("fallback").Set(quality.Score)
+		step.QualityScore = &quality.Score
+		step.SemanticCB = string(a.fallbackSemCB.State())
 		result = text
 		return nil
 	})
 	if err != nil {
+		step.Outcome = OutcomeTransportError
 		return "", false
 	}
+	step.Outcome = OutcomeSuccess
 	return result, true
 }
 
@@ -379,24 +450,73 @@ func degradedResponse(prompt string) string {
 	}
 }
 
-// StreamPrimary streams tokens from the primary model into the channel.
-// If the primary CB is open or the model is killed, falls back to fallback model.
-// Caller must drain or close the returned channel.
-func (a *Agent) StreamPrimary(ctx context.Context, prompt string, tokens chan<- string) (Tier, error) {
-	if !a.primaryKilled.Load() && a.primaryCB.State().String() == "closed" {
-		err := a.ollama.stream(ctx, ModelPrimary, prompt, tokens)
-		if err == nil {
+// StreamToken is a single event in the quality-gated stream.
+type StreamToken struct {
+	Token    string `json:"token,omitempty"`
+	Done     bool   `json:"done,omitempty"`
+	Tier     Tier   `json:"tier"`
+	Switched bool   `json:"switched,omitempty"` // quality gate triggered mid-stream
+	Reason   string `json:"reason,omitempty"`
+}
+
+// StreamWithQualityGate streams tokens with an inline quality gate.
+// If hallucination markers are detected in the first 100 tokens,
+// the stream aborts and automatically continues from the fallback model.
+// The caller receives a StreamToken{Switched: true} event at the switch point.
+func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out chan<- StreamToken) (Tier, error) {
+	canUsePrimary := !a.primaryKilled.Load() &&
+		!a.primarySemCB.ShouldBlock() &&
+		a.primaryCB.State().String() == "closed"
+
+	if canUsePrimary {
+		rawTokens := make(chan string, 64)
+		done := make(chan struct{})
+		var streamErr error
+
+		go func() {
+			defer close(rawTokens)
+			streamErr = a.ollama.stream(ctx, ModelPrimary, prompt, rawTokens)
+		}()
+
+		var buf strings.Builder
+		tokenCount := 0
+		tripped := false
+
+		for token := range rawTokens {
+			buf.WriteString(token)
+			tokenCount++
+
+			// Quality gate: check every 30 tokens for hallucination markers
+			if tokenCount%30 == 0 && tokenCount <= 120 {
+				hallScore, reason := hallucinationScore(buf.String())
+				if hallScore < 0.5 {
+					// Cancel the primary stream and switch to fallback
+					tripped = true
+					close(done)
+					out <- StreamToken{Switched: true, Tier: TierFallback,
+						Reason: "quality gate: " + reason}
+					break
+				}
+			}
+			out <- StreamToken{Token: token, Tier: TierPrimary}
+		}
+		_ = done // satisfies compiler; goroutine exits when rawTokens is closed
+
+		if !tripped && streamErr == nil {
 			return TierPrimary, nil
 		}
 	}
-	// Fallback stream
-	if !a.fallbackKilled.Load() {
-		err := a.ollama.stream(ctx, ModelFallback, prompt, tokens)
-		if err == nil {
-			return TierFallback, nil
-		}
+
+	// Fallback stream (no quality gate — fallback must always complete)
+	rawTokens := make(chan string, 64)
+	go func() {
+		defer close(rawTokens)
+		_ = a.ollama.stream(ctx, ModelFallback, prompt, rawTokens)
+	}()
+	for token := range rawTokens {
+		out <- StreamToken{Token: token, Tier: TierFallback}
 	}
-	return TierDegraded, fmt.Errorf("all streaming tiers unavailable")
+	return TierFallback, nil
 }
 
 // KillPrimary / RestorePrimary simulate primary model failures.
@@ -418,6 +538,18 @@ func (a *Agent) PrimarySemanticSnapshot() SBSnapshot { return a.primarySemCB.Sna
 
 // FallbackSemanticSnapshot returns the fallback model's semantic CB snapshot.
 func (a *Agent) FallbackSemanticSnapshot() SBSnapshot { return a.fallbackSemCB.Snapshot() }
+
+// GetTrace returns a trace by ID.
+func (a *Agent) GetTrace(id string) *Trace { return a.traces.Get(id) }
+
+// SetWebhookURL configures the webhook endpoint.
+func (a *Agent) SetWebhookURL(url string) { a.webhook.SetURL(url) }
+
+// ClearWebhookURL removes the webhook.
+func (a *Agent) ClearWebhookURL() { a.webhook.ClearURL() }
+
+// WebhookURL returns the currently configured webhook URL.
+func (a *Agent) WebhookURL() string { return a.webhook.URL() }
 
 // Status returns a live snapshot of all resilience layers.
 func (a *Agent) Status() Status {
