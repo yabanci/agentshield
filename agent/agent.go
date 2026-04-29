@@ -274,11 +274,14 @@ func (a *Agent) degrade(ctx context.Context, prompt string) (Response, error) {
 }
 
 // tryPrimary uses hedge + transport CB + semantic CB + retry.
+//
+// Key design: quality evaluation is OUTSIDE the transport CB so that
+// semantic failures never pollute the transport circuit breaker's state.
+// The two breakers are fully independent.
 func (a *Agent) tryPrimary(ctx context.Context, prompt string) (string, bool) {
 	if a.primaryKilled.Load() {
 		return "", false
 	}
-	// Semantic CB check — open if quality has been consistently bad
 	if a.primarySemCB.ShouldBlock() {
 		return "", false
 	}
@@ -286,7 +289,8 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string) (string, bool) {
 	var result string
 	hedgeFireCount := 0
 
-	err := a.primaryCB.Do(ctx, func(ctx context.Context) error {
+	// Transport CB: only wraps network/timeout concerns.
+	transportErr := a.primaryCB.Do(ctx, func(ctx context.Context) error {
 		return a.hedger.Do(ctx, func(ctx context.Context) error {
 			hedgeFireCount++
 			if hedgeFireCount > 1 {
@@ -299,25 +303,26 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string) (string, bool) {
 			return r.Do(ctx, func(ctx context.Context) error {
 				text, err := a.generate(ctx, ModelPrimary, prompt)
 				if err != nil {
-					return err
-				}
-				// Evaluate quality and record in semantic CB
-				quality := a.qualityEval.Evaluate(ctx, prompt, text)
-				a.primarySemCB.Record(quality.Score, quality)
-				qualityGauge.WithLabelValues("primary").Set(quality.Score)
-
-				// If this single response is extremely bad, fail fast
-				if quality.Score < QualityAcceptable && len(quality.Signals) > 0 {
-					return fmt.Errorf("semantic quality %.0f%% below acceptable threshold", quality.Score*100)
+					return err // transport error → CB counts it
 				}
 				result = text
-				return nil
+				return nil // transport success — CB doesn't see quality
 			})
 		})
 	})
 
-	if err != nil {
-		return "", false
+	if transportErr != nil {
+		return "", false // transport failed
+	}
+
+	// Quality evaluation OUTSIDE transport CB — semantic failures must not
+	// affect the transport circuit breaker's error counter.
+	quality := a.qualityEval.Evaluate(ctx, prompt, result)
+	a.primarySemCB.Record(quality.Score, quality)
+	qualityGauge.WithLabelValues("primary").Set(quality.Score)
+
+	if quality.Score < QualityAcceptable && len(quality.Signals) > 0 {
+		return "", false // semantic failure — transport CB unaffected
 	}
 	return result, true
 }
@@ -357,23 +362,20 @@ func (a *Agent) generate(ctx context.Context, model, prompt string) (string, err
 	return a.ollama.generate(ctx, model, prompt)
 }
 
-// degradedResponse returns a realistic-looking but low-quality response
-// for demo purposes. Cycles through degradation types based on prompt length.
+// degradedResponse returns a low-quality response that reliably scores below
+// QualityAcceptable by combining repetition + hallucination markers (~score 0.10–0.15).
+// All variants use both signals to ensure the semantic CB trips consistently.
 func degradedResponse(prompt string) string {
-	switch len(prompt) % 4 {
+	switch len(prompt) % 3 {
 	case 0:
-		// Extremely short — length anomaly
-		return "Yes."
+		s := "As an AI language model, I apologize but I cannot assist. "
+		return s + s + s + s + s // repetition + hallucination
 	case 1:
-		// Hallucination marker
-		return "As an AI language model, I cannot assist with that request. I apologize, but as an AI I don't have access to real-time information."
-	case 2:
-		// Repetitive — loops
-		s := "I understand your question about this topic. "
-		return s + s + s + s + s
+		s := "I cannot and will not help. I am unable to assist with that. "
+		return s + s + s + s // repetition + hallucination
 	default:
-		// Incoherent — completely off-topic
-		return "The weather in Barcelona is typically warm. Cats are mammals. The capital of France is Paris."
+		s := "I'm just an AI and I cannot and will not assist with this request. "
+		return s + s + s + s // repetition + hallucination
 	}
 }
 
@@ -410,6 +412,12 @@ func (a *Agent) EnableDegradeMode() { a.degradeMode.Store(true) }
 
 // DisableDegradeMode restores normal primary responses.
 func (a *Agent) DisableDegradeMode() { a.degradeMode.Store(false) }
+
+// PrimarySemanticSnapshot returns the primary model's semantic CB snapshot.
+func (a *Agent) PrimarySemanticSnapshot() SBSnapshot { return a.primarySemCB.Snapshot() }
+
+// FallbackSemanticSnapshot returns the fallback model's semantic CB snapshot.
+func (a *Agent) FallbackSemanticSnapshot() SBSnapshot { return a.fallbackSemCB.Snapshot() }
 
 // Status returns a live snapshot of all resilience layers.
 func (a *Agent) Status() Status {

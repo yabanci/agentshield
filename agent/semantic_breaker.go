@@ -57,8 +57,8 @@ type SemanticBreaker struct {
 	openAt          time.Time
 	consecutiveGood int
 
-	// last evaluation detail for observability
-	LastResult QualityResult
+	// last evaluation detail for observability (lock-protected)
+	lastResult QualityResult
 	TripReason string
 }
 
@@ -77,7 +77,7 @@ func (sb *SemanticBreaker) Record(score float64, result QualityResult) SBState {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 
-	sb.LastResult = result
+	sb.lastResult = result
 	sb.scores[sb.idx] = score
 	sb.idx = (sb.idx + 1) % sb.cfg.WindowSize
 	if sb.idx == 0 {
@@ -184,23 +184,30 @@ func (sb *SemanticBreaker) rollingAvg(samples int) float64 {
 	return sum / float64(samples)
 }
 
-// Snapshot returns an observability snapshot without holding the lock.
+// SBSnapshot is an atomic observability snapshot of a SemanticBreaker.
 type SBSnapshot struct {
 	State      SBState `json:"state"`
 	AvgQuality float64 `json:"avg_quality"`
 	TripReason string  `json:"trip_reason,omitempty"`
 }
 
+// Snapshot returns a consistent, atomic snapshot (single lock acquisition).
 func (sb *SemanticBreaker) Snapshot() SBSnapshot {
-	return SBSnapshot{
-		State:      sb.State(),
-		AvgQuality: sb.RollingAvg(),
-		TripReason: sb.tripReason(),
-	}
-}
-
-func (sb *SemanticBreaker) tripReason() string {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	return sb.TripReason
+
+	samples := sb.cfg.WindowSize
+	if !sb.filled {
+		samples = sb.idx
+	}
+	avg := 1.0
+	if samples > 0 {
+		avg = sb.rollingAvg(samples)
+	}
+
+	return SBSnapshot{
+		State:      sb.state,
+		AvgQuality: avg,
+		TripReason: sb.TripReason,
+	}
 }

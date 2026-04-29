@@ -60,7 +60,7 @@ func NewTestQualityEvaluator(embedder Embedder) *QualityEvaluator {
 // Evaluate scores a (prompt, response) pair.
 // ctx is used only if the embedder is set; a failed embed skips coherence gracefully.
 func (e *QualityEvaluator) Evaluate(ctx context.Context, prompt, response string) QualityResult {
-	var signals []QualitySignal
+	signals := make([]QualitySignal, 0) // never nil — serializes as [] not null
 	score := 1.0
 
 	// ── Signal 1: Repetition (weight 0.45) ──────────────────────────────────
@@ -72,7 +72,13 @@ func (e *QualityEvaluator) Evaluate(ctx context.Context, prompt, response string
 	}
 
 	// ── Signal 2: Length anomaly (weight 0.25) ───────────────────────────────
+	// Absolute minimum: responses under 10 chars are always anomalous
+	// regardless of baseline (handles "Yes.", "No.", "OK." style responses).
 	lenScore, lenDetail := e.lengthScore(len(response))
+	if len(response) < 10 && len(response) > 0 {
+		lenScore = 0.0
+		lenDetail = "response below absolute minimum length"
+	}
 	if lenScore < 1.0 {
 		penalty := (1.0 - lenScore) * 0.25
 		signals = append(signals, QualitySignal{"length_anomaly", penalty, lenDetail})
