@@ -52,22 +52,25 @@ type Response struct {
 
 // Status is a live snapshot of the agent's resilience state.
 type Status struct {
-	PrimaryBreaker       string     `json:"primary_breaker"`
-	FallbackBreaker      string     `json:"fallback_breaker"`
-	PrimaryKilled        bool       `json:"primary_killed"`
-	FallbackKilled       bool       `json:"fallback_killed"`
-	CacheSize            int        `json:"cache_size"`
-	TotalRequests        int64      `json:"total_requests"`
-	ErrorRate            float64    `json:"error_rate"`
-	LoadshedLimit        int        `json:"loadshed_limit"`
-	LoadshedInflight     int        `json:"loadshed_inflight"`
-	InteractiveBusy      int        `json:"interactive_busy"`
-	BatchBusy            int        `json:"batch_busy"`
-	ActiveSessions       int        `json:"active_sessions"`
-	ChaosRunning         bool       `json:"chaos_running"`
-	PrimarySemanticCB    SBSnapshot `json:"primary_semantic_cb"`
-	FallbackSemanticCB   SBSnapshot `json:"fallback_semantic_cb"`
-	DegradeMode          bool       `json:"degrade_mode"`
+	PrimaryBreaker     string             `json:"primary_breaker"`
+	FallbackBreaker    string             `json:"fallback_breaker"`
+	PrimaryKilled      bool               `json:"primary_killed"`
+	FallbackKilled     bool               `json:"fallback_killed"`
+	CacheSize          int                `json:"cache_size"`
+	TotalRequests      int64              `json:"total_requests"`
+	ErrorRate          float64            `json:"error_rate"`
+	LoadshedLimit      int                `json:"loadshed_limit"`
+	LoadshedInflight   int                `json:"loadshed_inflight"`
+	InteractiveBusy    int                `json:"interactive_busy"`
+	BatchBusy          int                `json:"batch_busy"`
+	ActiveSessions     int                `json:"active_sessions"`
+	ChaosRunning       bool               `json:"chaos_running"`
+	PrimarySemanticCB  SBSnapshot         `json:"primary_semantic_cb"`
+	FallbackSemanticCB SBSnapshot         `json:"fallback_semantic_cb"`
+	DegradeMode        bool               `json:"degrade_mode"`
+	Costs              CostStats          `json:"costs"`
+	TierCounts         TierRequestCounts  `json:"tier_counts"`
+	Score              ResilienceScore    `json:"score"`
 }
 
 // Agent is the resilient LLM client.
@@ -87,6 +90,7 @@ type Agent struct {
 	sessions       *SessionStore
 	traces         *TraceStore
 	webhook        *WebhookDispatcher
+	costs          *CostTracker
 	chaosMu        atomic.Bool
 	primaryKilled  atomic.Bool
 	fallbackKilled atomic.Bool
@@ -155,6 +159,7 @@ func newAgent(ollamaURL string) *Agent {
 		})
 	})
 
+	a.costs = newCostTracker()
 	a.qualityEval = newQualityEvaluator(ol.embed)
 	a.cache = newSemanticCache(10*time.Minute, ol.embed)
 	a.tools = newToolRegistry(a)
@@ -282,6 +287,7 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 		requestsTotal.WithLabelValues("primary").Inc()
 		requestDuration.WithLabelValues("primary").Observe(dur.Seconds())
 		a.cache.set(ctx, prompt, text)
+		a.costs.Record(TierPrimary, text)
 		return Response{Text: text, Tier: TierPrimary}, nil
 	}
 
@@ -291,6 +297,7 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 		requestsTotal.WithLabelValues("fallback").Inc()
 		requestDuration.WithLabelValues("fallback").Observe(dur.Seconds())
 		a.cache.set(ctx, prompt, text)
+		a.costs.Record(TierFallback, text)
 		return Response{Text: text, Tier: TierFallback}, nil
 	}
 
@@ -299,6 +306,7 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 		requestsTotal.WithLabelValues("cache").Inc()
 		tr.addStep(TraceStep{Tier: TierCache, Outcome: OutcomeCacheHit,
 			LatencyMS: time.Since(start).Milliseconds()})
+		a.costs.Record(TierCache, cached)
 		return Response{Text: cached, Tier: TierCache, Cached: true}, nil
 	}
 
@@ -306,6 +314,7 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 	requestsTotal.WithLabelValues("degraded").Inc()
 	tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial,
 		LatencyMS: time.Since(start).Milliseconds()})
+	a.costs.Record(TierDegraded, "")
 	return Response{
 		Text: "All AI tiers are currently unavailable. Please try again shortly.",
 		Tier: TierDegraded,
@@ -578,7 +587,11 @@ func (a *Agent) Status() Status {
 	semanticCBStateGauge.WithLabelValues("primary").Set(sbStateValue(pSem.State))
 	semanticCBStateGauge.WithLabelValues("fallback").Set(sbStateValue(fSem.State))
 
-	return Status{
+	pr, fr, cr, dr := a.costs.TierCounts()
+	tierCounts := TierRequestCounts{Primary: pr, Fallback: fr, Cache: cr, Denied: dr}
+	costs := a.costs.Snapshot()
+
+	s := Status{
 		PrimaryBreaker:     primaryState,
 		FallbackBreaker:    fallbackState,
 		PrimaryKilled:      a.primaryKilled.Load(),
@@ -595,7 +608,11 @@ func (a *Agent) Status() Status {
 		PrimarySemanticCB:  pSem,
 		FallbackSemanticCB: fSem,
 		DegradeMode:        a.degradeMode.Load(),
+		Costs:              costs,
+		TierCounts:         tierCounts,
 	}
+	s.Score = ComputeScore(s)
+	return s
 }
 
 // Ping checks if Ollama is reachable.

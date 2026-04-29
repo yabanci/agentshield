@@ -160,6 +160,41 @@ All tests use `httptest.Server` — no running Ollama required.
 
 ---
 
+## Deploy to TrueFoundry
+
+AgentShield deploys natively to TrueFoundry in 3 commands:
+
+```bash
+# 1. Install TrueFoundry CLI
+pip install truefoundry
+
+# 2. Login and create the Ollama URL secret
+tfy login
+tfy secret create --name OLLAMA_URL --value "http://<your-ollama-host>:11434"
+
+# 3. Deploy
+python truefoundry/deploy.py --workspace <YOUR_WORKSPACE_FQN>
+```
+
+Or apply the YAML manifest directly:
+```bash
+tfy apply -f truefoundry/service.yaml --workspace <YOUR_WORKSPACE_FQN>
+```
+
+AgentShield exposes `/health` for liveness/readiness probes and `/metrics` for Prometheus scraping — both are wired into the TrueFoundry service manifest.
+
+---
+
+## Tests
+
+```bash
+go test ./...
+```
+
+All tests use `httptest.Server` — no running Ollama required.
+
+---
+
 ## Submission
 
 Built for the [TrueFoundry Resilient Agents Challenge](https://devnetwork-ai-ml-hack-2026.devpost.com/) — DevNetwork AI+ML Hackathon 2026.

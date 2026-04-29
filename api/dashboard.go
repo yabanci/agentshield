@@ -240,6 +240,47 @@ hr{border:none;border-top:1px solid #1f2937;margin:12px 0}
     </div>
   </div>
 
+  <!-- Resilience Score -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div class="label" style="margin:0">Resilience Score</div>
+      <span id="score-grade" class="badge green" style="font-size:14px;padding:4px 12px">A</span>
+    </div>
+    <div style="text-align:center;margin-bottom:14px">
+      <div id="score-total" style="font-size:52px;font-weight:800;color:#f9fafb;line-height:1">100</div>
+      <div style="font-size:11px;color:#6b7280;margin-top:4px">out of 100</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">
+      <div class="stat"><div class="stat-v" id="score-transport" style="font-size:16px">25</div><div class="stat-l">Transport /25</div></div>
+      <div class="stat"><div class="stat-v" id="score-quality" style="font-size:16px">25</div><div class="stat-l">Quality /25</div></div>
+      <div class="stat"><div class="stat-v" id="score-cache" style="font-size:16px">25</div><div class="stat-l">Cache /25</div></div>
+      <div class="stat"><div class="stat-v" id="score-avail" style="font-size:16px">25</div><div class="stat-l">Availability /25</div></div>
+    </div>
+    <div id="score-rec" style="font-size:11px;color:#fcd34d;display:none;padding:6px 8px;background:#78350f22;border-radius:5px;border:1px solid #78350f"></div>
+  </div>
+
+  <!-- Cost Savings -->
+  <div class="card">
+    <div class="label">💰 Cost Savings</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">
+      <div class="stat"><div class="stat-v" id="cost-spent" style="font-size:14px">$0.0000</div><div class="stat-l">Spent (est.)</div></div>
+      <div class="stat"><div class="stat-v" id="cost-saved" style="font-size:14px;color:#6ee7b7">$0.0000</div><div class="stat-l">Saved</div></div>
+    </div>
+    <div style="margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;margin-bottom:4px">
+        <span>Savings rate</span>
+        <span id="cost-pct">0%</span>
+      </div>
+      <div style="background:#1f2937;border-radius:4px;height:6px;overflow:hidden">
+        <div id="cost-bar" style="background:#059669;height:100%;width:0%;transition:width .5s"></div>
+      </div>
+    </div>
+    <div style="font-size:10px;color:#4b5563;line-height:1.8">
+      <div>Cache hits: <span id="cost-cache-hits" style="color:#a78bfa">0</span> requests → <span id="cost-saved-cache" style="color:#6ee7b7">$0.0000</span></div>
+      <div>Fallback routing: <span id="cost-fallback-reqs" style="color:#fcd34d">0</span> requests → <span id="cost-saved-fallback" style="color:#6ee7b7">$0.0000</span></div>
+    </div>
+  </div>
+
   <div class="card">
     <div class="label">Live Stats</div>
     <div class="stat-grid">
@@ -589,6 +630,33 @@ async function refreshStatus(){
     document.getElementById('chaos-badge').style.display=s.chaos_running?'inline':'none';
     document.getElementById('degrade-badge').style.display=s.degrade_mode?'inline':'none';
 
+    // Resilience Score
+    const sc = s.score||{};
+    const br = sc.breakdown||{};
+    document.getElementById('score-total').textContent = sc.total||0;
+    document.getElementById('score-grade').textContent = sc.grade||'?';
+    document.getElementById('score-grade').className = 'badge '+scoreGradeClass(sc.total||0);
+    document.getElementById('score-transport').textContent = br.transport_health||0;
+    document.getElementById('score-quality').textContent = br.semantic_quality||0;
+    document.getElementById('score-cache').textContent = br.cache_efficiency||0;
+    document.getElementById('score-avail').textContent = br.availability||0;
+    document.getElementById('score-total').style.color = scoreColor(sc.total||0);
+    const rec = document.getElementById('score-rec');
+    if(sc.recommendation){rec.textContent=sc.recommendation;rec.style.display='block';}
+    else rec.style.display='none';
+
+    // Cost savings
+    const co = s.costs||{};
+    const spent = (co.spent_primary_usd||0)+(co.spent_fallback_usd||0);
+    document.getElementById('cost-spent').textContent = '$'+(spent).toFixed(4);
+    document.getElementById('cost-saved').textContent = '$'+(co.total_saved_usd||0).toFixed(4);
+    document.getElementById('cost-pct').textContent = (co.savings_percent||0).toFixed(1)+'%';
+    document.getElementById('cost-bar').style.width = Math.min(100,co.savings_percent||0)+'%';
+    document.getElementById('cost-cache-hits').textContent = s.tier_counts?.cache||0;
+    document.getElementById('cost-saved-cache').textContent = '$'+(co.saved_by_cache_usd||0).toFixed(4);
+    document.getElementById('cost-fallback-reqs').textContent = s.tier_counts?.fallback||0;
+    document.getElementById('cost-saved-fallback').textContent = '$'+(co.saved_by_fallback_usd||0).toFixed(4);
+
     addLinePoint(s.total_requests);
   }catch(_){}
 }
@@ -653,6 +721,8 @@ function showTier(tier,cached,turns,traceId){
   } else if(traceB) traceB.style.display='none';
 }
 function tierEmoji(t){return{primary:'🧠',fallback:'⚡',cache:'💾',degraded:'🔕'}[t]||'?';}
+function scoreGradeClass(n){if(n>=90)return'green';if(n>=75)return'blue';if(n>=60)return'yellow';return'red';}
+function scoreColor(n){if(n>=90)return'#6ee7b7';if(n>=75)return'#93c5fd';if(n>=60)return'#fcd34d';return'#fca5a5';}
 function logClass(t){return t==='degraded'?'le2':t!=='primary'?'lw':'';}
 function log(msg,cls){
   const el=document.getElementById('log');
