@@ -245,7 +245,6 @@ func (sb *SemanticBreaker) updateState(latestScore float64) {
 		}
 
 	case SBFailing:
-		// probe window handled in ShouldBlock via openAt check
 		if latestScore >= sb.cfg.DegradedThreshold {
 			sb.consecutiveGood++
 			if sb.consecutiveGood >= sb.cfg.RecoverySamples {
@@ -256,6 +255,10 @@ func (sb *SemanticBreaker) updateState(latestScore float64) {
 			}
 		} else {
 			sb.consecutiveGood = 0
+			// Bad probe: reset openAt so the next probe waits the full
+			// OpenTimeout again. Without this, ShouldBlock() would allow
+			// immediate re-probing after a fast-returning bad result.
+			sb.openAt = time.Now()
 		}
 	}
 }
