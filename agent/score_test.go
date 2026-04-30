@@ -16,9 +16,9 @@ func healthyStatus() agent.Status {
 		FallbackSemanticCB: agent.SBSnapshot{
 			State: agent.SBHealthy, AvgQuality: 0.88,
 		},
-		CacheSize: 30,
+		CacheSize: 40, // fully warm cache
 		TierCounts: agent.TierRequestCounts{
-			Primary: 80, Fallback: 15, Cache: 20, Denied: 0,
+			Primary: 80, Fallback: 10, Cache: 30, Denied: 0,
 		},
 	}
 }
@@ -87,6 +87,36 @@ func TestScore_RecommendationSetWhenDegraded(t *testing.T) {
 	score := agent.ComputeScore(s)
 	if score.Recommendation == "" {
 		t.Error("expected non-empty recommendation when primary is killed")
+	}
+}
+
+func TestScore_ColdStartGetsFullCachePoints(t *testing.T) {
+	s := agent.Status{
+		PrimaryBreaker:  "closed",
+		FallbackBreaker: "closed",
+		PrimarySemanticCB: agent.SBSnapshot{State: agent.SBHealthy},
+		FallbackSemanticCB: agent.SBSnapshot{State: agent.SBHealthy},
+		// No traffic, no cache entries yet
+		CacheSize:  0,
+		TierCounts: agent.TierRequestCounts{},
+	}
+	score := agent.ComputeScore(s)
+	if score.Total != 100 {
+		t.Errorf("idle healthy system should score 100, got %d (breakdown: %+v)",
+			score.Total, score.Breakdown)
+	}
+	if score.Grade != "A" {
+		t.Errorf("expected grade A for idle healthy system, got %s", score.Grade)
+	}
+}
+
+func TestScore_CacheHitsCountAsAvailable(t *testing.T) {
+	s := healthyStatus()
+	// All traffic goes to cache — should still be fully available
+	s.TierCounts = agent.TierRequestCounts{Cache: 100, Denied: 0}
+	score := agent.ComputeScore(s)
+	if score.Breakdown.Availability != 25 {
+		t.Errorf("100%% cache hits should give full availability, got %d", score.Breakdown.Availability)
 	}
 }
 

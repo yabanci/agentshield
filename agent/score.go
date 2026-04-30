@@ -75,32 +75,38 @@ func ComputeScore(s Status) ResilienceScore {
 	b.SemanticQuality = pScore + fScore
 
 	// ── Component 3: Cache Efficiency (25 pts) ─────────────────────────────
-	// Linear scale: 0 entries = 0pts, 40+ entries = 25pts.
-	// Also boosted by savings percentage.
-	cacheScore := s.CacheSize
-	if cacheScore > 40 {
-		cacheScore = 40
-	}
-	b.CacheEfficiency = cacheScore * 25 / 40
-
-	// Boost if we have cost savings data
-	if s.Costs.SavingsPercent > 0 {
-		savingsBoost := int(s.Costs.SavingsPercent / 100 * 5) // up to +5 pts
-		b.CacheEfficiency += savingsBoost
-		if b.CacheEfficiency > 25 {
-			b.CacheEfficiency = 25
+	// Uses CacheSize as a proxy for cache warmth (0 = cold, 40+ = fully warm).
+	// Returns full points when there's no traffic yet (cold start is not a failure).
+	totalForEff := s.TierCounts.Primary + s.TierCounts.Fallback +
+		s.TierCounts.Cache + s.TierCounts.Denied
+	if totalForEff == 0 {
+		b.CacheEfficiency = 25 // idle system — not penalised
+	} else {
+		size := s.CacheSize
+		if size > 40 {
+			size = 40
+		}
+		b.CacheEfficiency = size * 25 / 40
+		// Bonus for measurable cost savings (max +5, capped at 25)
+		if s.Costs.SavingsPercent > 0 {
+			bonus := int(s.Costs.SavingsPercent / 100 * 5)
+			b.CacheEfficiency += bonus
+			if b.CacheEfficiency > 25 {
+				b.CacheEfficiency = 25
+			}
 		}
 	}
 
 	// ── Component 4: Availability (25 pts) ─────────────────────────────────
-	// % of requests answered by primary or fallback (not graceful denial).
-	total := s.TierCounts.Primary + s.TierCounts.Fallback +
+	// % of requests that received a real response (primary, fallback, OR cache).
+	// Only graceful denials count against availability.
+	totalReqs := s.TierCounts.Primary + s.TierCounts.Fallback +
 		s.TierCounts.Cache + s.TierCounts.Denied
-	if total > 0 {
-		realResponses := s.TierCounts.Primary + s.TierCounts.Fallback
-		b.Availability = int(float64(realResponses) / float64(total) * 25)
+	if totalReqs == 0 {
+		b.Availability = 25 // no traffic yet = assume healthy
 	} else {
-		b.Availability = 25 // no requests yet = assume healthy
+		served := totalReqs - s.TierCounts.Denied // all tiers except graceful denial
+		b.Availability = int(float64(served) / float64(totalReqs) * 25)
 	}
 
 	total100 := b.TransportHealth + b.SemanticQuality + b.CacheEfficiency + b.Availability
