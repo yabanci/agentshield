@@ -59,6 +59,12 @@ type CalibrationInfo struct {
 	BaselineStd      float64 `json:"baseline_std,omitempty"`
 	LearnedDegraded  float64 `json:"learned_degraded,omitempty"`
 	LearnedFailing   float64 `json:"learned_failing,omitempty"`
+
+	// Drift detection: long-term mean tracked separately from baseline.
+	// If |LongTermMean - BaselineMean| > 0.20, Drift is true.
+	LongTermMean   float64 `json:"long_term_mean,omitempty"`
+	LongTermCount  int     `json:"long_term_count,omitempty"`
+	Drift          bool    `json:"drift_detected,omitempty"`
 }
 
 // SemanticBreaker tracks quality scores and blocks routing when quality
@@ -134,6 +140,19 @@ func (sb *SemanticBreaker) Record(score float64, result QualityResult) SBState {
 		sb.calibration.SamplesCollected = len(sb.calibSamples)
 		if len(sb.calibSamples) >= sb.calibN {
 			sb.calibrate()
+		}
+	} else if sb.calibration.Calibrated {
+		// Drift detection: incrementally update long-term mean.
+		// Once we have 30+ post-calibration samples, compare to baseline.
+		sb.calibration.LongTermCount++
+		n := float64(sb.calibration.LongTermCount)
+		sb.calibration.LongTermMean += (score - sb.calibration.LongTermMean) / n
+		if sb.calibration.LongTermCount >= 30 {
+			diff := sb.calibration.LongTermMean - sb.calibration.BaselineMean
+			if diff < 0 {
+				diff = -diff
+			}
+			sb.calibration.Drift = diff > 0.20
 		}
 	}
 

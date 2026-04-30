@@ -39,20 +39,21 @@ func validatePrompt(prompt string) (int, string, bool) {
 
 // Handler holds all HTTP route handlers.
 type Handler struct {
-	agent *agent.Agent
+	agent     *agent.Agent
+	ipLimiter *ipLimiter
 }
 
 func New(a *agent.Agent) *Handler {
-	return &Handler{agent: a}
+	return &Handler{agent: a, ipLimiter: newIPLimiter()}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
-	// Core chat
-	mux.HandleFunc("POST /chat", h.chat)
-	mux.HandleFunc("GET /chat/stream", h.chatStream)
+	// Core chat — IP rate-limited (60 req/min/IP) to prevent saturation
+	mux.HandleFunc("POST /chat", h.ipLimiter.middleware(h.chat))
+	mux.HandleFunc("GET /chat/stream", h.ipLimiter.middleware(h.chatStream))
 
-	// ReAct agent
-	mux.HandleFunc("POST /react", h.react)
+	// ReAct agent — also rate-limited
+	mux.HandleFunc("POST /react", h.ipLimiter.middleware(h.react))
 
 	// Sessions
 	mux.HandleFunc("GET /sessions", h.listSessions)
@@ -61,26 +62,32 @@ func (h *Handler) Register(mux *http.ServeMux) {
 
 	// Status & metrics
 	mux.HandleFunc("GET /status", h.status)
+	mux.HandleFunc("GET /score/history", h.scoreHistory)
 	mux.HandleFunc("GET /health", h.health)
+	mux.HandleFunc("GET /health/live", h.healthLive)
+	mux.HandleFunc("GET /health/ready", h.healthReady)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	// Demo controls
-	mux.HandleFunc("POST /demo/kill", h.killPrimary)
-	mux.HandleFunc("POST /demo/restore", h.restorePrimary)
-	mux.HandleFunc("POST /demo/kill-fallback", h.killFallback)
-	mux.HandleFunc("POST /demo/restore-fallback", h.restoreFallback)
-	mux.HandleFunc("POST /demo/chaos", h.startChaos)
-	mux.HandleFunc("GET /demo/chaos/stream", h.chaosStream)
-	mux.HandleFunc("POST /demo/degrade", h.enableDegrade)
-	mux.HandleFunc("POST /demo/restore-quality", h.disableDegrade)
+	// Demo controls (auth-gated when AGENTSHIELD_AUTH_TOKEN is set)
+	mux.HandleFunc("POST /demo/kill", requireAuth(h.killPrimary))
+	mux.HandleFunc("POST /demo/restore", requireAuth(h.restorePrimary))
+	mux.HandleFunc("POST /demo/kill-fallback", requireAuth(h.killFallback))
+	mux.HandleFunc("POST /demo/restore-fallback", requireAuth(h.restoreFallback))
+	mux.HandleFunc("POST /demo/chaos", requireAuth(h.startChaos))
+	mux.HandleFunc("GET /demo/chaos/stream", requireAuth(h.chaosStream))
+	mux.HandleFunc("POST /demo/degrade", requireAuth(h.enableDegrade))
+	mux.HandleFunc("POST /demo/restore-quality", requireAuth(h.disableDegrade))
+
+	// Auth discovery for the dashboard
+	mux.HandleFunc("GET /auth/required", h.authRequired)
 
 	// Trace
 	mux.HandleFunc("GET /trace/{id}", h.getTrace)
 
-	// Webhook config
-	mux.HandleFunc("POST /config/webhook", h.setWebhook)
+	// Webhook config (auth-gated)
+	mux.HandleFunc("POST /config/webhook", requireAuth(h.setWebhook))
 	mux.HandleFunc("GET /config/webhook", h.getWebhook)
-	mux.HandleFunc("DELETE /config/webhook", h.clearWebhook)
+	mux.HandleFunc("DELETE /config/webhook", requireAuth(h.clearWebhook))
 
 	// Dashboard
 	mux.HandleFunc("GET /", h.dashboard)
@@ -147,15 +154,32 @@ func (h *Handler) chatStream(w http.ResponseWriter, r *http.Request) {
 		tier, _ = h.agent.StreamWithQualityGate(ctx, prompt, out)
 	}()
 
-	for st := range out {
-		data, _ := json.Marshal(st)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
-	}
+	// SSE heartbeat: send a comment every 15s if no token has been sent,
+	// to keep proxies/load balancers from killing the connection.
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 
-	done, _ := json.Marshal(agent.StreamToken{Done: true, Tier: tier})
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", done)
-	flusher.Flush()
+	for {
+		select {
+		case st, ok := <-out:
+			if !ok {
+				done, _ := json.Marshal(agent.StreamToken{Done: true, Tier: tier})
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", done)
+				flusher.Flush()
+				return
+			}
+			data, _ := json.Marshal(st)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+			// Reset heartbeat: real activity counts as a keepalive.
+			heartbeat.Reset(15 * time.Second)
+		case <-heartbeat.C:
+			_, _ = fmt.Fprint(w, ":heartbeat\n\n")
+			flusher.Flush()
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // ─── ReAct ─────────────────────────────────────────────────────────────────
@@ -218,14 +242,33 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, h.agent.Status())
 }
 
+func (h *Handler) scoreHistory(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, h.agent.ScoreHistorySnapshot())
+}
+
+// health is the legacy combined endpoint (alias for /health/ready).
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
+	h.healthReady(w, r)
+}
+
+// healthLive is the Kubernetes liveness probe — returns 200 if the
+// process is alive. Does NOT check dependencies, so a brief Ollama outage
+// won't trigger pod restart.
+func (h *Handler) healthLive(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, map[string]string{"status": "alive"})
+}
+
+// healthReady is the Kubernetes readiness probe — returns 200 only if
+// dependencies (Ollama) are reachable. K8s removes the pod from the
+// service if this fails, but won't restart it.
+func (h *Handler) healthReady(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	if err := h.agent.Ping(ctx); err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	jsonOK(w, map[string]string{"status": "ok"})
+	jsonOK(w, map[string]string{"status": "ready"})
 }
 
 // ─── Demo controls ─────────────────────────────────────────────────────────
@@ -325,6 +368,10 @@ func (h *Handler) setWebhook(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "url is required", http.StatusBadRequest)
 		return
 	}
+	if err := validateWebhookURL(body.URL); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	h.agent.SetWebhookURL(body.URL)
 	jsonOK(w, map[string]string{"result": "webhook configured", "url": body.URL})
 }
@@ -336,6 +383,11 @@ func (h *Handler) getWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{"configured": true, "url": url})
+}
+
+// authRequired tells the dashboard whether bearer-token auth is enabled.
+func (h *Handler) authRequired(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, map[string]bool{"required": AuthEnabled()})
 }
 
 func (h *Handler) clearWebhook(w http.ResponseWriter, r *http.Request) {

@@ -70,6 +70,7 @@ type Status struct {
 	DegradeMode        bool               `json:"degrade_mode"`
 	Costs              CostStats          `json:"costs"`
 	TierCounts         TierRequestCounts  `json:"tier_counts"`
+	Latency            LatencySnapshot    `json:"latency"`
 	Score              ResilienceScore    `json:"score"`
 }
 
@@ -93,6 +94,8 @@ type Agent struct {
 	traces         *TraceStore
 	webhook        *WebhookDispatcher
 	costs          *CostTracker
+	latency        *LatencyTracker
+	scoreHistory   *ScoreHistory
 	chaosMu        atomic.Bool
 	primaryKilled  atomic.Bool
 	fallbackKilled atomic.Bool
@@ -165,6 +168,8 @@ func newAgent(ollamaURL string) *Agent {
 	})
 
 	a.costs = newCostTracker()
+	a.latency = newLatencyTracker()
+	a.scoreHistory = newScoreHistory(60)
 	a.qualityEval = newQualityEvaluator(ol.embed)
 	a.cache = newSemanticCache(10*time.Minute, ol.embed)
 	a.tools = newToolRegistry(a)
@@ -271,7 +276,7 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 		loadshedTotal.Inc()
 		resp = Response{Text: "Server is overloaded. Please try again in a moment.", Tier: TierDegraded}
 		tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial, LatencyMS: 0})
-		a.costs.Record(TierDegraded, "") // keep TierCounts in sync with TotalRequests
+		a.costs.Record(TierDegraded, prompt, "") // keep TierCounts in sync with TotalRequests
 	} else if errors.Is(err, bulkhead.ErrFull) {
 		bulkheadFullTotal.WithLabelValues(func() string {
 			if batch {
@@ -281,7 +286,7 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 		}()).Inc()
 		resp = Response{Text: "Too many concurrent requests. Please try again shortly.", Tier: TierDegraded}
 		tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial, LatencyMS: 0})
-		a.costs.Record(TierDegraded, "") // keep TierCounts in sync with TotalRequests
+		a.costs.Record(TierDegraded, prompt, "") // keep TierCounts in sync with TotalRequests
 	} else if err != nil {
 		return resp, err
 	}
@@ -301,8 +306,9 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 		dur := time.Since(start)
 		requestsTotal.WithLabelValues("primary").Inc()
 		requestDuration.WithLabelValues("primary").Observe(dur.Seconds())
+		a.latency.Record(TierPrimary, dur)
 		a.cache.set(ctx, prompt, text)
-		a.costs.Record(TierPrimary, text)
+		a.costs.Record(TierPrimary, prompt, text)
 		return Response{Text: text, Tier: TierPrimary}, nil
 	}
 
@@ -311,17 +317,20 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 		dur := time.Since(start)
 		requestsTotal.WithLabelValues("fallback").Inc()
 		requestDuration.WithLabelValues("fallback").Observe(dur.Seconds())
+		a.latency.Record(TierFallback, dur)
 		a.cache.set(ctx, prompt, text)
-		a.costs.Record(TierFallback, text)
+		a.costs.Record(TierFallback, prompt, text)
 		return Response{Text: text, Tier: TierFallback}, nil
 	}
 
 	// Tier 3: semantic cache
 	if cached, ok := a.cache.get(ctx, prompt); ok {
+		dur := time.Since(start)
 		requestsTotal.WithLabelValues("cache").Inc()
+		a.latency.Record(TierCache, dur)
 		tr.addStep(TraceStep{Tier: TierCache, Outcome: OutcomeCacheHit,
-			LatencyMS: time.Since(start).Milliseconds()})
-		a.costs.Record(TierCache, cached)
+			LatencyMS: dur.Milliseconds()})
+		a.costs.Record(TierCache, prompt, cached)
 		return Response{Text: cached, Tier: TierCache, Cached: true}, nil
 	}
 
@@ -329,7 +338,7 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 	requestsTotal.WithLabelValues("degraded").Inc()
 	tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial,
 		LatencyMS: time.Since(start).Milliseconds()})
-	a.costs.Record(TierDegraded, "")
+	a.costs.Record(TierDegraded, prompt, "")
 	return Response{
 		Text: "All AI tiers are currently unavailable. Please try again shortly.",
 		Tier: TierDegraded,
@@ -578,6 +587,9 @@ func (a *Agent) FallbackSemanticSnapshot() SBSnapshot { return a.fallbackSemCB.S
 // GetTrace returns a trace by ID.
 func (a *Agent) GetTrace(id string) *Trace { return a.traces.Get(id) }
 
+// ScoreHistorySnapshot returns the recent score points for sparkline rendering.
+func (a *Agent) ScoreHistorySnapshot() []ScorePoint { return a.scoreHistory.Snapshot() }
+
 // SetWebhookURL configures the webhook endpoint.
 func (a *Agent) SetWebhookURL(url string) { a.webhook.SetURL(url) }
 
@@ -605,6 +617,7 @@ func (a *Agent) Status() Status {
 	pr, fr, cr, dr := a.costs.TierCounts()
 	tierCounts := TierRequestCounts{Primary: pr, Fallback: fr, Cache: cr, Denied: dr}
 	costs := a.costs.Snapshot()
+	lat := a.latency.Snapshot()
 
 	s := Status{
 		PrimaryBreaker:     primaryState,
@@ -625,8 +638,10 @@ func (a *Agent) Status() Status {
 		DegradeMode:        a.degradeMode.Load(),
 		Costs:              costs,
 		TierCounts:         tierCounts,
+		Latency:            lat,
 	}
 	s.Score = ComputeScore(s)
+	a.scoreHistory.Record(s.Score.Total)
 	return s
 }
 

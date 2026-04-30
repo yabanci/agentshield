@@ -249,12 +249,15 @@ hr{border:none;border-top:1px solid #1f2937;margin:12px 0}
     <div style="text-align:center;margin-bottom:14px">
       <div id="score-total" style="font-size:52px;font-weight:800;color:#f9fafb;line-height:1">100</div>
       <div style="font-size:11px;color:#6b7280;margin-top:4px">out of 100</div>
+      <canvas id="score-spark" height="40" style="margin-top:8px;width:100%"></canvas>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">
-      <div class="stat"><div class="stat-v" id="score-transport" style="font-size:16px">25</div><div class="stat-l">Transport /25</div></div>
-      <div class="stat"><div class="stat-v" id="score-quality" style="font-size:16px">25</div><div class="stat-l">Quality /25</div></div>
-      <div class="stat"><div class="stat-v" id="score-cache" style="font-size:16px">25</div><div class="stat-l">Cache /25</div></div>
-      <div class="stat"><div class="stat-v" id="score-avail" style="font-size:16px">25</div><div class="stat-l">Availability /25</div></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:10px">
+      <div class="stat"><div class="stat-v" id="score-transport" style="font-size:14px">20</div><div class="stat-l">Transport /20</div></div>
+      <div class="stat"><div class="stat-v" id="score-quality" style="font-size:14px">20</div><div class="stat-l">Quality /20</div></div>
+      <div class="stat"><div class="stat-v" id="score-cache" style="font-size:14px">20</div><div class="stat-l">Cache /20</div></div>
+      <div class="stat"><div class="stat-v" id="score-avail" style="font-size:14px">20</div><div class="stat-l">Availability /20</div></div>
+      <div class="stat"><div class="stat-v" id="score-latency" style="font-size:14px">20</div><div class="stat-l">Latency /20</div></div>
+      <div class="stat"><div class="stat-v" id="score-p95" style="font-size:13px;color:#93c5fd">—</div><div class="stat-l">Primary p95</div></div>
     </div>
     <div id="score-rec" style="font-size:11px;color:#fcd34d;display:none;padding:6px 8px;background:#78350f22;border-radius:5px;border:1px solid #78350f"></div>
   </div>
@@ -428,7 +431,7 @@ async function doChat(prompt){
     document.getElementById('resp-box').textContent=data.text;
     showTier(data.tier,data.cached,0,data.trace_id);
     tierCounts[data.tier]=(tierCounts[data.tier]||0)+1; updateDonut();
-    const traceLink = data.trace_id ? ' [<a href="/trace/'+data.trace_id+'" target="_blank" style="color:#93c5fd;text-decoration:none">trace↗</a>]' : '';
+    const traceLink = data.trace_id ? ' [<a href="javascript:showTrace(\''+data.trace_id+'\')" style="color:#93c5fd;text-decoration:none">trace↗</a>]' : '';
     document.getElementById('log').innerHTML='<div class="le '+logClass(data.tier)+'">['+new Date().toLocaleTimeString()+'] ← '+tierEmoji(data.tier)+' '+data.tier+(data.cached?' (cached)':'')+traceLink+'</div>'+document.getElementById('log').innerHTML;
   }catch(e){
     document.getElementById('resp-box').textContent='Error: '+e.message;
@@ -459,22 +462,37 @@ async function doReact(prompt){
 
 async function doStream(prompt){
   const box=document.getElementById('resp-box');
-  box.textContent='';
+  box.innerHTML='';
   const url='/chat/stream?prompt='+encodeURIComponent(prompt);
   const es=new EventSource(url);
   let tier='primary';
+  let switched = false;
   await new Promise(res=>{
     es.onmessage=e=>{
       const d=JSON.parse(e.data);
-      if(d.done){tier=d.tier||tier;es.close();res();}
-      else box.textContent+=d.token;
+      if(d.done){tier=d.tier||tier;es.close();res();return;}
+      if(d.switched){
+        // B-7: visualize the quality-gate switch in the stream.
+        switched = true;
+        const div = document.createElement('div');
+        div.style.cssText='border-left:3px solid #f97316;background:#7c2d1222;padding:8px 12px;margin:8px 0;border-radius:5px;font-size:12px;color:#fcd34d';
+        div.textContent='⚡ quality gate triggered — switched to '+(d.tier||'fallback')+(d.reason?' ('+d.reason+')':'');
+        box.appendChild(div);
+        tier = d.tier || 'fallback';
+        return;
+      }
+      // Append token text — preserve switch divider as a child node.
+      const tokenSpan = document.createElement('span');
+      tokenSpan.textContent = d.token;
+      if(switched) tokenSpan.style.background='#92400e22';
+      box.appendChild(tokenSpan);
     };
     es.onerror=()=>{es.close();res();};
     setTimeout(()=>{es.close();res();},90000);
   });
   showTier(tier,false);
   tierCounts[tier]=(tierCounts[tier]||0)+1; updateDonut();
-  log('← 📡 stream via '+tier, logClass(tier));
+  log('← 📡 stream via '+tier+(switched?' (quality-gate switched)':''), logClass(tier));
 }
 
 function renderSteps(steps){
@@ -572,13 +590,13 @@ async function startChaos(){
 // ── Manual controls ──────────────────────────────────────────────────────
 async function kill(which){
   const url=which==='fallback'?'/demo/kill-fallback':'/demo/kill';
-  await fetch(url,{method:'POST'});
+  await authFetch(url,{method:'POST'});
   log('💀 '+which+' killed (transport)','lw');
   await refreshStatus();
 }
 async function restore(which){
   const url=which==='fallback'?'/demo/restore-fallback':'/demo/restore';
-  await fetch(url,{method:'POST'});
+  await authFetch(url,{method:'POST'});
   log('✅ '+which+' restored','');
   await refreshStatus();
 }
@@ -640,10 +658,29 @@ async function refreshStatus(){
     document.getElementById('score-quality').textContent = br.semantic_quality||0;
     document.getElementById('score-cache').textContent = br.cache_efficiency||0;
     document.getElementById('score-avail').textContent = br.availability||0;
+    document.getElementById('score-latency').textContent = br.latency||0;
     document.getElementById('score-total').style.color = scoreColor(sc.total||0);
+
+    const lat = s.latency||{};
+    const p95 = lat.primary_p95_ms||0;
+    document.getElementById('score-p95').textContent = p95>0 ? (p95<1000?p95+'ms':(p95/1000).toFixed(1)+'s') : '—';
+
+    // Drift detection from primary semantic CB calibration
+    const driftBadge = document.getElementById('calib-primary');
+    if(pSem.calibration?.drift_detected){
+      driftBadge.textContent = '⚠ drift detected';
+      driftBadge.className = 'badge yellow';
+      driftBadge.title = 'Long-term mean ('+(Math.round(pSem.calibration.long_term_mean*100))+'%) drifted >20pp from baseline ('+(Math.round(pSem.calibration.baseline_mean*100))+'%)';
+    }
+
     const rec = document.getElementById('score-rec');
     if(sc.recommendation){rec.textContent=sc.recommendation;rec.style.display='block';}
     else rec.style.display='none';
+
+    // Score history sparkline
+    if(window._scoreHistFetch !== false){
+      fetch('/score/history').then(r=>r.json()).then(pts=>drawSparkline(pts)).catch(()=>{});
+    }
 
     // Cost savings
     const co = s.costs||{};
@@ -716,11 +753,101 @@ function showTier(tier,cached,turns,traceId){
   else turnsB.style.display='none';
   const traceB=document.getElementById('trace-badge');
   if(traceId && traceB){
-    traceB.innerHTML='<a href="/trace/'+traceId+'" target="_blank" style="color:#93c5fd;text-decoration:none">📋 trace</a>';
+    traceB.innerHTML='<a href="javascript:showTrace(\''+traceId+'\')" style="color:#93c5fd;text-decoration:none">📋 trace</a>';
     traceB.style.display='inline';
   } else if(traceB) traceB.style.display='none';
 }
 function tierEmoji(t){return{primary:'🧠',fallback:'⚡',cache:'💾',degraded:'🔕'}[t]||'?';}
+
+// Draws the Resilience Score sparkline using HTML5 canvas (no chart lib).
+function drawSparkline(points){
+  const canvas = document.getElementById('score-spark');
+  if(!canvas || !points || points.length===0) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio||1;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if(canvas.width !== w*dpr){canvas.width=w*dpr;canvas.height=h*dpr;ctx.scale(dpr,dpr);}
+  ctx.clearRect(0,0,w,h);
+  const min = 0, max = 100;
+  ctx.beginPath();
+  for(let i=0;i<points.length;i++){
+    const x = (i/(points.length-1||1))*w;
+    const y = h - ((points[i].total-min)/(max-min))*h;
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  const last = points[points.length-1].total;
+  ctx.strokeStyle = scoreColor(last);
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // Fill below line for visual emphasis
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.fillStyle = scoreColor(last) + '22';
+  ctx.fill();
+}
+
+// Auth: prompt for token if /auth/required says so; cache in localStorage.
+let _authToken = localStorage.getItem('agentshield-auth') || '';
+async function ensureAuth(){
+  try{
+    const r = await fetch('/auth/required');
+    const d = await r.json();
+    if(d.required && !_authToken){
+      const token = prompt('Auth token required for demo controls:');
+      if(token){
+        _authToken = token;
+        localStorage.setItem('agentshield-auth', token);
+      }
+    }
+  }catch(_){}
+}
+function authFetch(url, opts){
+  opts = opts || {};
+  if(_authToken){
+    opts.headers = opts.headers || {};
+    opts.headers['Authorization'] = 'Bearer '+_authToken;
+  }
+  return fetch(url, opts);
+}
+
+// Trace viewer modal
+async function showTrace(traceId){
+  try{
+    const tr = await fetch('/trace/'+traceId).then(r=>r.json());
+    let html = '<div style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center" onclick="this.remove()">';
+    html += '<div style="background:#111827;border:1px solid #374151;border-radius:10px;padding:24px;max-width:700px;max-height:80vh;overflow-y:auto;width:90%" onclick="event.stopPropagation()">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">';
+    html += '<div><div style="font-size:14px;font-weight:600;color:#f9fafb">Trace '+tr.id+'</div>';
+    html += '<div style="font-size:11px;color:#6b7280">'+tr.total_ms+'ms · final tier: '+tr.final_tier+'</div></div>';
+    html += '<button onclick="this.closest(\'[onclick]\').parentElement.remove()" style="background:#1f2937;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer">×</button>';
+    html += '</div>';
+    html += '<div style="font-size:12px;color:#9ca3af;margin-bottom:12px">Prompt: <span style="color:#e2e8f0">'+escapeHtml(tr.prompt)+'</span></div>';
+    (tr.steps||[]).forEach((s,i)=>{
+      const tierC = {primary:'#3b82f6',fallback:'#d97706',cache:'#7c3aed',degraded:'#dc2626'}[s.tier]||'#6b7280';
+      html += '<div style="border-left:3px solid '+tierC+';padding:10px 12px;margin-bottom:6px;background:#0a0c14;border-radius:6px">';
+      html += '<div style="display:flex;justify-content:space-between"><span style="font-size:13px;font-weight:600">'+tierEmoji(s.tier)+' '+s.tier+'</span>';
+      html += '<span style="font-size:11px;color:#6b7280">'+s.latency_ms+'ms</span></div>';
+      html += '<div style="font-size:11px;color:#9ca3af;margin-top:4px">outcome: <b>'+s.outcome+'</b>';
+      if(s.transport_cb) html += ' · transport: '+s.transport_cb;
+      if(s.semantic_cb) html += ' · semantic: '+s.semantic_cb;
+      if(s.quality_score!=null) html += ' · quality: '+(s.quality_score*100).toFixed(0)+'%';
+      html += '</div>';
+      if(s.quality_signals && s.quality_signals.length){
+        html += '<div style="font-size:10px;color:#fcd34d;margin-top:3px">signals: '+s.quality_signals.join(', ')+'</div>';
+      }
+      html += '</div>';
+    });
+    html += '</div></div>';
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    document.body.appendChild(div.firstChild);
+  }catch(e){alert('failed to load trace: '+e.message);}
+}
+function escapeHtml(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+window.showTrace = showTrace;
+
 function scoreGradeClass(n){if(n>=90)return'green';if(n>=75)return'blue';if(n>=60)return'yellow';return'red';}
 function scoreColor(n){if(n>=90)return'#6ee7b7';if(n>=75)return'#93c5fd';if(n>=60)return'#fcd34d';return'#fca5a5';}
 function logClass(t){return t==='degraded'?'le2':t!=='primary'?'lw':'';}
@@ -735,7 +862,10 @@ document.getElementById('prompt').addEventListener('keydown',e=>{
   if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))sendPrompt();
 });
 
-checkOllama(); refreshStatus();
+ensureAuth().then(()=>{
+  checkOllama();
+  refreshStatus();
+});
 setInterval(refreshStatus,3000);
 setInterval(checkOllama,15000);
 </script>

@@ -58,7 +58,8 @@ func TestScore_SemanticFailureReducesQualityComponent(t *testing.T) {
 	s.PrimarySemanticCB = agent.SBSnapshot{State: agent.SBFailing, AvgQuality: 0.15}
 
 	score := agent.ComputeScore(s)
-	if score.Breakdown.SemanticQuality > 10 {
+	// Primary failing → primary contribution = 0; only fallback (8) remains.
+	if score.Breakdown.SemanticQuality > 8 {
 		t.Errorf("failing semantic CB should lower quality component, got %d",
 			score.Breakdown.SemanticQuality)
 	}
@@ -115,8 +116,9 @@ func TestScore_CacheHitsCountAsAvailable(t *testing.T) {
 	// All traffic goes to cache — should still be fully available
 	s.TierCounts = agent.TierRequestCounts{Cache: 100, Denied: 0}
 	score := agent.ComputeScore(s)
-	if score.Breakdown.Availability != 25 {
-		t.Errorf("100%% cache hits should give full availability, got %d", score.Breakdown.Availability)
+	if score.Breakdown.Availability != 20 {
+		t.Errorf("100%% cache hits should give full availability (20), got %d",
+			score.Breakdown.Availability)
 	}
 }
 
@@ -131,20 +133,37 @@ func TestScore_AllComponentsBounded(t *testing.T) {
 	for _, s := range statuses {
 		score := agent.ComputeScore(s)
 		b := score.Breakdown
-		if b.TransportHealth < 0 || b.TransportHealth > 25 {
+		if b.TransportHealth < 0 || b.TransportHealth > 20 {
 			t.Errorf("transport_health out of range: %d", b.TransportHealth)
 		}
-		if b.SemanticQuality < 0 || b.SemanticQuality > 25 {
+		if b.SemanticQuality < 0 || b.SemanticQuality > 20 {
 			t.Errorf("semantic_quality out of range: %d", b.SemanticQuality)
 		}
-		if b.CacheEfficiency < 0 || b.CacheEfficiency > 25 {
+		if b.CacheEfficiency < 0 || b.CacheEfficiency > 20 {
 			t.Errorf("cache_efficiency out of range: %d", b.CacheEfficiency)
 		}
-		if b.Availability < 0 || b.Availability > 25 {
+		if b.Availability < 0 || b.Availability > 20 {
 			t.Errorf("availability out of range: %d", b.Availability)
+		}
+		if b.Latency < 0 || b.Latency > 20 {
+			t.Errorf("latency out of range: %d", b.Latency)
 		}
 		if score.Total < 0 || score.Total > 100 {
 			t.Errorf("total score out of range: %d", score.Total)
 		}
+	}
+}
+
+func TestScore_LatencyAffectsScore(t *testing.T) {
+	s := healthyStatus()
+	s.Latency.PrimaryP95MS = 0
+	healthy := agent.ComputeScore(s)
+
+	s.Latency.PrimaryP95MS = 8000 // 8s p95 — clearly slow
+	slow := agent.ComputeScore(s)
+
+	if slow.Breakdown.Latency >= healthy.Breakdown.Latency {
+		t.Errorf("slow p95 should reduce latency component: fast=%d slow=%d",
+			healthy.Breakdown.Latency, slow.Breakdown.Latency)
 	}
 }
