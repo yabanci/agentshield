@@ -258,6 +258,7 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 		loadshedTotal.Inc()
 		resp = Response{Text: "Server is overloaded. Please try again in a moment.", Tier: TierDegraded}
 		tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial, LatencyMS: 0})
+		a.costs.Record(TierDegraded, "") // keep TierCounts in sync with TotalRequests
 	} else if errors.Is(err, bulkhead.ErrFull) {
 		bulkheadFullTotal.WithLabelValues(func() string {
 			if batch {
@@ -267,6 +268,7 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 		}()).Inc()
 		resp = Response{Text: "Too many concurrent requests. Please try again shortly.", Tier: TierDegraded}
 		tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial, LatencyMS: 0})
+		a.costs.Record(TierDegraded, "") // keep TierCounts in sync with TotalRequests
 	} else if err != nil {
 		return resp, err
 	}

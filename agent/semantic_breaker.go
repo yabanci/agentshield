@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -72,6 +73,7 @@ type SemanticBreaker struct {
 	state           SBState
 	openAt          time.Time
 	consecutiveGood int
+	probeInFlight   atomic.Bool // prevents thundering herd in probe window
 
 	// Adaptive calibration — learns thresholds from first N observations.
 	calibSamples []float64
@@ -139,6 +141,11 @@ func (sb *SemanticBreaker) Record(score float64, result QualityResult) SBState {
 	sb.idx = (sb.idx + 1) % sb.cfg.WindowSize
 	if sb.idx == 0 {
 		sb.filled = true
+	}
+
+	// Release the probe semaphore so the next caller can probe after us.
+	if sb.state == SBFailing {
+		sb.clearProbe()
 	}
 
 	prev := sb.state
@@ -245,6 +252,7 @@ func (sb *SemanticBreaker) updateState(latestScore float64) {
 				sb.state = SBHealthy
 				sb.TripReason = ""
 				sb.consecutiveGood = 0
+				sb.probeInFlight.Store(false) // reset for next trip
 			}
 		} else {
 			sb.consecutiveGood = 0
@@ -254,7 +262,9 @@ func (sb *SemanticBreaker) updateState(latestScore float64) {
 
 // ShouldBlock returns true if this breaker is open and the request
 // should be routed to the next tier.
-// Returns false (allow probe) after OpenTimeout expires.
+// After OpenTimeout, allows ONE probe through at a time — subsequent
+// concurrent callers are still blocked until the probe completes and
+// Record() updates the state. This prevents thundering herd on recovery.
 func (sb *SemanticBreaker) ShouldBlock() bool {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -263,9 +273,16 @@ func (sb *SemanticBreaker) ShouldBlock() bool {
 		return false
 	}
 	if time.Since(sb.openAt) >= sb.cfg.OpenTimeout {
-		return false // allow one probe through
+		// Only one probe at a time via CAS; others stay blocked.
+		return !sb.probeInFlight.CompareAndSwap(false, true)
 	}
 	return true
+}
+
+// clearProbe releases the probe semaphore. Called automatically by Record()
+// when the breaker is in SBFailing state.
+func (sb *SemanticBreaker) clearProbe() {
+	sb.probeInFlight.Store(false)
 }
 
 // State returns the current state without modifying anything.
