@@ -84,7 +84,11 @@ func (e *QualityEvaluator) Evaluate(ctx context.Context, prompt, response string
 		signals = append(signals, QualitySignal{"length_anomaly", penalty, lenDetail})
 		score -= penalty
 	}
-	e.recordLength(len(response))
+	// Only record non-empty lengths in the baseline.
+	// Storing 0 would corrupt the rolling average and create false positives.
+	if len(response) > 0 {
+		e.recordLength(len(response))
+	}
 
 	// ── Signal 3: Hallucination markers (weight 0.40) ───────────────────────
 	hallScore, hallDetail := hallucinationScore(response)

@@ -111,6 +111,8 @@ func (c *semanticCache) size() int {
 }
 
 // prune removes expired entries. Must be called with lock held.
+// Zeros the tail so GC can collect strings and embedding slices in
+// pruned entries (filter-in-place otherwise keeps them reachable).
 func (c *semanticCache) prune() {
 	now := time.Now()
 	live := c.entries[:0]
@@ -118,6 +120,9 @@ func (c *semanticCache) prune() {
 		if !now.After(e.expiresAt) {
 			live = append(live, e)
 		}
+	}
+	for i := len(live); i < len(c.entries); i++ {
+		c.entries[i] = cacheEntry{} // allow GC of strings and embedding slices
 	}
 	c.entries = live
 }
