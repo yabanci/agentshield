@@ -26,6 +26,9 @@ func newLatencyTracker() *LatencyTracker {
 	}
 }
 
+// NewTestLatencyTracker creates a LatencyTracker for use in tests.
+func NewTestLatencyTracker() *LatencyTracker { return newLatencyTracker() }
+
 // Record adds a latency sample for the given tier.
 func (l *LatencyTracker) Record(tier Tier, d time.Duration) {
 	l.mu.Lock()

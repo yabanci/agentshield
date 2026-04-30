@@ -32,6 +32,19 @@ func newScoreHistory(capacity int) *ScoreHistory {
 	}
 }
 
+// NewTestScoreHistory creates a ScoreHistory with the production 1-second throttle.
+func NewTestScoreHistory(capacity int) *ScoreHistory {
+	return newScoreHistory(capacity)
+}
+
+// NewTestScoreHistoryFast creates a ScoreHistory with no throttle — for tests
+// that need to inject many samples back-to-back.
+func NewTestScoreHistoryFast(capacity int) *ScoreHistory {
+	h := newScoreHistory(capacity)
+	h.minGap = 0
+	return h
+}
+
 // Record adds a sample, but throttles to at most one per minGap.
 func (h *ScoreHistory) Record(score int) {
 	h.mu.Lock()

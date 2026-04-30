@@ -74,6 +74,51 @@ func TestAdaptive_TighterThresholdsForHighQualityModel(t *testing.T) {
 	}
 }
 
+func TestAdaptive_DriftDetected(t *testing.T) {
+	cfg := agent.DefaultSBConfig
+	sb := agent.NewSemanticBreakerWithCalibN(cfg, 5)
+
+	// Calibrate with a high baseline (mean ~0.92).
+	for i := 0; i < 5; i++ {
+		sb.Record(0.92, agent.QualityResult{Score: 0.92})
+	}
+	snap := sb.Snapshot()
+	if !snap.Calibration.Calibrated {
+		t.Fatal("expected calibrated")
+	}
+	if snap.Calibration.Drift {
+		t.Fatal("should not detect drift before any post-calibration samples")
+	}
+
+	// Feed 30+ post-calibration samples that drift down sharply (mean ~0.50).
+	for i := 0; i < 35; i++ {
+		sb.Record(0.50, agent.QualityResult{Score: 0.50})
+	}
+	snap = sb.Snapshot()
+	if !snap.Calibration.Drift {
+		t.Errorf("expected drift detection: baseline=%.2f long_term=%.2f",
+			snap.Calibration.BaselineMean, snap.Calibration.LongTermMean)
+	}
+}
+
+func TestAdaptive_NoDriftWithinTolerance(t *testing.T) {
+	cfg := agent.DefaultSBConfig
+	sb := agent.NewSemanticBreakerWithCalibN(cfg, 5)
+
+	for i := 0; i < 5; i++ {
+		sb.Record(0.85, agent.QualityResult{Score: 0.85})
+	}
+	// Post-calibration samples within ±0.10 of baseline — no drift.
+	for i := 0; i < 35; i++ {
+		sb.Record(0.80, agent.QualityResult{Score: 0.80})
+	}
+	snap := sb.Snapshot()
+	if snap.Calibration.Drift {
+		t.Errorf("should not detect drift within 20pp tolerance: baseline=%.2f long_term=%.2f",
+			snap.Calibration.BaselineMean, snap.Calibration.LongTermMean)
+	}
+}
+
 func TestAdaptive_SamplesCountedCorrectly(t *testing.T) {
 	sb := agent.NewSemanticBreakerWithCalibN(agent.DefaultSBConfig, 8)
 

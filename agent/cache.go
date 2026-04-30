@@ -39,6 +39,24 @@ func newSemanticCache(ttl time.Duration, embedder Embedder) *semanticCache {
 	}
 }
 
+// TestCache exposes the internal cache for testing.
+type TestCache struct{ c *semanticCache }
+
+// NewTestSemanticCache creates a cache for use in tests.
+func NewTestSemanticCache(ttl time.Duration, embedder Embedder) *TestCache {
+	return &TestCache{c: newSemanticCache(ttl, embedder)}
+}
+
+// SetForTest exposes set() for tests.
+func (t *TestCache) SetForTest(ctx context.Context, prompt, response string) {
+	t.c.set(ctx, prompt, response)
+}
+
+// GetForTest exposes get() for tests.
+func (t *TestCache) GetForTest(ctx context.Context, prompt string) (string, bool) {
+	return t.c.get(ctx, prompt)
+}
+
 // get returns a cached response for the prompt.
 // Uses semantic similarity if embeddings are available, exact match otherwise.
 func (c *semanticCache) get(ctx context.Context, prompt string) (string, bool) {
