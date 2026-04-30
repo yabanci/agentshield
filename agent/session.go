@@ -88,6 +88,20 @@ func (s *SessionStore) Get(id string) *Session {
 	return s.sessions[id]
 }
 
+// Messages returns a defensive copy of the session's message history.
+// Safe for concurrent use — callers must not hold any external lock.
+func (s *SessionStore) Messages(id string) []Message {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[id]
+	if !ok || len(sess.Messages) == 0 {
+		return nil
+	}
+	cp := make([]Message, len(sess.Messages))
+	copy(cp, sess.Messages)
+	return cp
+}
+
 // Add appends a message to a session, trimming if over limit.
 func (s *SessionStore) Add(sessionID string, msg Message) {
 	s.mu.Lock()

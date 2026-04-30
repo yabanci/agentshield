@@ -35,10 +35,11 @@ type ReactResponse struct {
 // Each tool call has its own circuit breaker via ToolRegistry.
 func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactResponse, error) {
 	tools := a.tools
-	session := a.sessions.GetOrCreate(sessionID)
+	a.sessions.GetOrCreate(sessionID) // ensure session exists
 
-	// Build conversation history for context
-	history := buildHistory(session.Messages)
+	// Copy messages under lock before building history to avoid a data race
+	// if concurrent requests share the same session ID.
+	history := buildHistory(a.sessions.Messages(sessionID))
 
 	// Full prompt = system + history + current user question
 	fullPrompt := tools.SystemPrompt() + "\n\n" + history + "User: " + prompt + "\nAssistant:"
