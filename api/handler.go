@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/yabanci/agentshield/agent"
 )
+
+// MaxPromptBytes caps incoming prompts to prevent memory blow-up from
+// adversarial or buggy clients (default: 32 KiB).
+const MaxPromptBytes = 32 * 1024
 
 type chatRequest struct {
 	Prompt    string `json:"prompt"`
@@ -18,6 +23,18 @@ type chatRequest struct {
 
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+// validatePrompt rejects empty or oversized prompts.
+func validatePrompt(prompt string) (int, string, bool) {
+	if prompt == "" {
+		return http.StatusBadRequest, "prompt is required", false
+	}
+	if len(prompt) > MaxPromptBytes {
+		return http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("prompt exceeds maximum size of %d bytes", MaxPromptBytes), false
+	}
+	return 0, "", true
 }
 
 // Handler holds all HTTP route handlers.
@@ -73,8 +90,12 @@ func (h *Handler) Register(mux *http.ServeMux) {
 
 func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Prompt == "" {
-		jsonError(w, "prompt is required", http.StatusBadRequest)
+	if err := json.NewDecoder(io.LimitReader(r.Body, MaxPromptBytes+1024)).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if code, msg, ok := validatePrompt(req.Prompt); !ok {
+		jsonError(w, msg, code)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
@@ -99,8 +120,8 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) chatStream(w http.ResponseWriter, r *http.Request) {
 	prompt := r.URL.Query().Get("prompt")
-	if prompt == "" {
-		http.Error(w, "prompt query param required", http.StatusBadRequest)
+	if code, msg, ok := validatePrompt(prompt); !ok {
+		http.Error(w, msg, code)
 		return
 	}
 
@@ -141,8 +162,12 @@ func (h *Handler) chatStream(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) react(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Prompt == "" {
-		jsonError(w, "prompt is required", http.StatusBadRequest)
+	if err := json.NewDecoder(io.LimitReader(r.Body, MaxPromptBytes+1024)).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if code, msg, ok := validatePrompt(req.Prompt); !ok {
+		jsonError(w, msg, code)
 		return
 	}
 
@@ -236,9 +261,10 @@ func (h *Handler) disableDegrade(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) startChaos(w http.ResponseWriter, r *http.Request) {
-	// Non-blocking: return 202, chaos runs in background
-	ctx := context.Background() // independent of request lifetime
-	_, err := h.agent.StartChaos(ctx)
+	// Non-blocking: return 202, chaos runs in background.
+	// Use the agent's lifetime context so chaos terminates on server shutdown
+	// rather than running forever (would block clean exit).
+	_, err := h.agent.StartChaos(h.agent.LifecycleContext())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusConflict)
 		return

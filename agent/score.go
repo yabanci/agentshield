@@ -86,7 +86,7 @@ func ComputeScore(s Status) ResilienceScore {
 		if size > 40 {
 			size = 40
 		}
-		b.CacheEfficiency = size * 25 / 40
+		b.CacheEfficiency = int(float64(size)*25.0/40.0 + 0.5) // round, not truncate
 		// Bonus for measurable cost savings (max +5, capped at 25)
 		if s.Costs.SavingsPercent > 0 {
 			bonus := int(s.Costs.SavingsPercent / 100 * 5)

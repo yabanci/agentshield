@@ -20,7 +20,15 @@ type Tool interface {
 	Execute(ctx context.Context, args map[string]any) (string, error)
 }
 
+// defaultToolTimeout caps per-tool execution time.
+// A misbehaving tool can otherwise hang the entire ReAct loop until the
+// parent context expires.
+const defaultToolTimeout = 10 * time.Second
+
 // ToolRegistry holds tools and wraps each with a circuit breaker.
+//
+// Both maps are populated once during newToolRegistry and never mutated
+// after that, so they are safe for concurrent reads without a lock.
 type ToolRegistry struct {
 	tools map[string]Tool
 	cbs   map[string]*circuitbreaker.Breaker
@@ -51,9 +59,13 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, args map[string
 	if !ok {
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
+	// Per-tool timeout — protects against hangs in tool implementations.
+	tctx, cancel := context.WithTimeout(ctx, defaultToolTimeout)
+	defer cancel()
+
 	cb := r.cbs[name]
 	var result string
-	err := cb.Do(ctx, func(ctx context.Context) error {
+	err := cb.Do(tctx, func(ctx context.Context) error {
 		var execErr error
 		result, execErr = t.Execute(ctx, args)
 		return execErr

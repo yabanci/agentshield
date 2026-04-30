@@ -108,6 +108,15 @@ func (e *QualityEvaluator) Evaluate(ctx context.Context, prompt, response string
 		}
 	}
 
+	// ── Signal 5: Language mismatch (weight 0.30) ────────────────────────────
+	// Detects responses in a different language than the prompt by comparing
+	// non-ASCII character ratios. Heuristic — assumes English-primary deployment.
+	if langScore, langDetail := languageMismatchScore(prompt, response); langScore < 1.0 {
+		penalty := (1.0 - langScore) * 0.30
+		signals = append(signals, QualitySignal{"language_mismatch", penalty, langDetail})
+		score -= penalty
+	}
+
 	if score < 0 {
 		score = 0
 	}
@@ -227,6 +236,16 @@ func hallucinationScore(text string) (float64, string) {
 }
 
 // coherenceScore measures semantic relevance of response to prompt.
+//
+// Combines two cosine-similarity comparisons:
+//
+//  1. Symmetric: sim(prompt, full_response) — overall topic relevance
+//  2. Asymmetric: sim(prompt, first_sentence) — does the response START
+//     by addressing the prompt, or is it preamble + off-topic content?
+//
+// If the first-sentence similarity is much lower than the full-response
+// similarity, the response likely opens with off-topic content (e.g., a
+// hallucinated refusal followed by unrelated information).
 func (e *QualityEvaluator) coherenceScore(ctx context.Context, prompt, response string) (float64, string) {
 	pVec, err := e.embedder(ctx, prompt)
 	if err != nil {
@@ -238,14 +257,87 @@ func (e *QualityEvaluator) coherenceScore(ctx context.Context, prompt, response 
 	}
 
 	sim := cosineSimilarity(pVec, rVec)
-	if sim >= 0.35 {
-		return 1.0, ""
-	}
+	score := 1.0
+	detail := ""
+
 	if sim < 0.10 {
 		return 0.0, "response semantically unrelated to prompt"
 	}
-	score := (sim - 0.10) / (0.35 - 0.10)
-	return score, "low semantic relevance to prompt"
+	if sim < 0.35 {
+		score = (sim - 0.10) / (0.35 - 0.10)
+		detail = "low semantic relevance to prompt"
+	}
+
+	// Asymmetric check: is the response ADDRESSING the prompt early on?
+	if firstSentence := firstSentence(response); firstSentence != "" && firstSentence != response {
+		fVec, err := e.embedder(ctx, firstSentence)
+		if err == nil {
+			fSim := cosineSimilarity(pVec, fVec)
+			// If the first sentence is much less coherent than the full
+			// response, the response opens with off-topic preamble.
+			if sim > 0 && fSim < 0.5*sim {
+				score *= 0.85 // 15% penalty
+				if detail == "" {
+					detail = "response opens with off-topic content"
+				}
+			}
+		}
+	}
+
+	return score, detail
+}
+
+// firstSentence extracts the first sentence from text (up to first . ! or ? ).
+func firstSentence(text string) string {
+	for i, r := range text {
+		if r == '.' || r == '!' || r == '?' {
+			s := strings.TrimSpace(text[:i+1])
+			if len(s) >= 10 { // ignore very short matches like "Yes."
+				return s
+			}
+		}
+	}
+	return text
+}
+
+// languageMismatchScore compares non-ASCII ratios of prompt and response.
+// English-primary heuristic: if prompt is mostly ASCII (English) but the
+// response is mostly non-ASCII (e.g., Chinese, Cyrillic), flag a mismatch.
+//
+// Returns 1.0 if no mismatch, 0.0 if clear mismatch.
+func languageMismatchScore(prompt, response string) (float64, string) {
+	if len(prompt) < 20 || len(response) < 20 {
+		return 1.0, "" // too short to judge reliably
+	}
+	pNonASCII := nonASCIIRatio(prompt)
+	rNonASCII := nonASCIIRatio(response)
+	// English prompt + foreign-language response
+	if pNonASCII < 0.10 && rNonASCII > 0.50 {
+		return 0.0, "response language differs from prompt"
+	}
+	// Foreign prompt + English response (less common but worth flagging)
+	if pNonASCII > 0.50 && rNonASCII < 0.10 {
+		return 0.5, "response may be in different language than prompt"
+	}
+	return 1.0, ""
+}
+
+func nonASCIIRatio(s string) float64 {
+	if len(s) == 0 {
+		return 0
+	}
+	nonASCII := 0
+	total := 0
+	for _, r := range s {
+		if r > 127 {
+			nonASCII++
+		}
+		total++
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(nonASCII) / float64(total)
 }
 
 // tokenize splits text into lowercase words, stripping punctuation.

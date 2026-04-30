@@ -75,6 +75,8 @@ type Status struct {
 
 // Agent is the resilient LLM client.
 type Agent struct {
+	lifeCtx        context.Context
+	lifeCancel     context.CancelFunc
 	ollama         *ollamaClient
 	primaryCB      *circuitbreaker.Breaker
 	fallbackCB     *circuitbreaker.Breaker
@@ -103,8 +105,11 @@ func newAgent(ollamaURL string) *Agent {
 		http:    newHTTPClient(),
 		baseURL: ollamaURL,
 	}
+	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	a := &Agent{
-		ollama: ol,
+		lifeCtx:    lifeCtx,
+		lifeCancel: lifeCancel,
+		ollama:     ol,
 		primaryCB: circuitbreaker.NewAdaptive(
 			20, 0.5, 5,
 			circuitbreaker.WithOpenTimeout(15*time.Second),
@@ -187,11 +192,19 @@ func NewWithOllamaURL(url string) *Agent {
 	return a
 }
 
-// Stop terminates all background goroutines (cleanup tickers).
+// Stop terminates all background goroutines (cleanup tickers, in-flight chaos).
 // Call when the Agent is no longer needed.
 func (a *Agent) Stop() {
+	a.lifeCancel()
 	a.traces.Stop()
 	a.sessions.Stop()
+}
+
+// LifecycleContext returns a context that is cancelled when the Agent is
+// stopped. Background tasks should derive from this so they terminate
+// on graceful shutdown.
+func (a *Agent) LifecycleContext() context.Context {
+	return a.lifeCtx
 }
 
 // StartChaos runs the automated chaos scenario asynchronously.

@@ -17,6 +17,7 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	a := agent.New()
+	defer a.Stop()
 	h := api.New(a)
 
 	mux := http.NewServeMux()

@@ -83,25 +83,58 @@ func (c *semanticCache) get(ctx context.Context, prompt string) (string, bool) {
 	return "", false
 }
 
-// set stores a prompt+response pair. Embedding is computed asynchronously.
+// set stores a prompt+response pair. The entry is appended immediately;
+// the embedding is computed asynchronously in a background goroutine to
+// avoid adding 200-500ms latency to every successful response.
+//
+// Until the embedding completes, only exact-match get() lookups will hit
+// this entry — semantic similarity matches will skip it (len(embedding)==0).
 func (c *semanticCache) set(ctx context.Context, prompt, response string) {
+	now := time.Now()
 	entry := cacheEntry{
 		prompt:    prompt,
 		response:  response,
-		expiresAt: time.Now().Add(c.ttl),
-	}
-
-	if c.embedder != nil {
-		if vec, err := c.embedder(ctx, prompt); err == nil {
-			entry.embedding = vec
-		}
+		expiresAt: now.Add(c.ttl),
 	}
 
 	c.mu.Lock()
 	c.prune()
 	c.entries = append(c.entries, entry)
+	idx := len(c.entries) - 1
 	cacheSizeGauge.Set(float64(len(c.entries)))
 	c.mu.Unlock()
+
+	if c.embedder == nil {
+		return
+	}
+
+	// Compute embedding async. We snapshot the prompt + creation time so
+	// we can find and update the right entry even if prune() runs in between.
+	go func(prompt string, createdAt time.Time) {
+		// Use a fresh context with timeout — caller's ctx may have already
+		// expired by the time the response is sent.
+		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		vec, err := c.embedder(bgCtx, prompt)
+		if err != nil {
+			return
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		// Best-effort: update if the entry still exists at idx.
+		// If prune() rebuilt the slice, search by prompt+expiresAt.
+		if idx < len(c.entries) && c.entries[idx].prompt == prompt &&
+			c.entries[idx].expiresAt.Equal(createdAt.Add(c.ttl)) {
+			c.entries[idx].embedding = vec
+			return
+		}
+		for i := range c.entries {
+			if c.entries[i].prompt == prompt && c.entries[i].expiresAt.Equal(createdAt.Add(c.ttl)) {
+				c.entries[i].embedding = vec
+				return
+			}
+		}
+	}(prompt, now)
 }
 
 func (c *semanticCache) size() int {
