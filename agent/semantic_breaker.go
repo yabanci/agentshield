@@ -180,8 +180,13 @@ func (sb *SemanticBreaker) calibrate() {
 	std := math.Sqrt(variance)
 
 	// Thresholds: mean ± 1σ and mean ± 2σ, floored to sane minimums.
+	// Enforce failing < degraded with a minimum gap of 0.10 to prevent
+	// both collapsing to the same value when std=0 (uniform samples).
 	degraded := math.Max(0.40, mean-1.0*std)
 	failing := math.Max(0.20, mean-2.0*std)
+	if degraded-failing < 0.10 {
+		failing = math.Max(0.10, degraded-0.15)
+	}
 
 	sb.cfg.DegradedThreshold = degraded
 	sb.cfg.FailingThreshold = failing

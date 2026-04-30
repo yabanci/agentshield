@@ -99,7 +99,7 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 			continue
 		}
 
-		steps = append(steps, ReactStep{Iteration: i + 2, Answer: raw})
+		steps = append(steps, ReactStep{Iteration: i + 1, Answer: raw})
 		return done(raw, i+1, lastTier), nil
 	}
 
