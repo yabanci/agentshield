@@ -1,80 +1,247 @@
 # AgentShield
 
-> 🏆 **Submission for [TrueFoundry Resilient Agents Challenge](https://devnetwork-ai-ml-hack-2026.devpost.com/) — DevNetwork AI+ML Hackathon 2026**
+> 🏆 **Submission for the [TrueFoundry Resilient Agents Challenge](https://devnetwork-ai-ml-hack-2026.devpost.com/) — DevNetwork AI+ML Hackathon 2026**
 
 **Production-grade resilience middleware for LLM agents — powered by [flowguard](https://github.com/yabanci/flowguard)**
 
-AgentShield demonstrates every major reliability pattern from the "Resilience Engineering" playbook, applied to LLM inference. When models fail, timeout, or overload — users never see an error.
+---
+
+## The problem nobody else solves
+
+Traditional circuit breakers open when a service **goes down** (HTTP 5xx, timeout).  
+LLMs fail differently — they stay **up** while silently degrading:
+
+- Model starts hallucinating ("As an AI language model, I cannot…")
+- Responses become repetitive loops
+- Output becomes semantically unrelated to the prompt
+- Response length collapses to a few words
+
+All of this returns **HTTP 200**. No existing circuit breaker catches it.
+
+**AgentShield introduces the Semantic Circuit Breaker**: a circuit breaker that opens on *quality degradation*, not transport errors.
+
+```
+Primary model HTTP 200 ✓  BUT  quality score: 18%
+                                 ↓
+                         Semantic CB: OPEN
+                         Transport CB: closed  ←  the key difference
+                                 ↓
+                         Request routed to fallback
+```
 
 ---
 
-## Degradation chain
+## How it works
+
+Every request flows through two independent protection stacks — one for transport, one for quality.
+
+### Degradation chain
 
 ```
 POST /chat
     │
-    ▼
-[Loadshed]   adaptive AIMD limit (TCP congestion control algorithm)
+    ▼ Loadshed (AIMD algorithm — same as TCP congestion control)
     │
-    ▼
-[Bulkhead]   interactive (20 slots) | batch (5 slots) — isolated concurrency
+    ▼ Bulkhead (interactive: 20 slots │ batch: 5 slots)
     │
-    ▼
-[CircuitBreaker → Hedge → Retry]   primary model: llama3.2
-    │  Adaptive CB trips at >50% error rate over 20-call window
-    │  Hedge: if no response in 1.5s, fires duplicate request in parallel
-    │  Retry: 2x exponential backoff (300ms base)
-    │
-    │  ← circuit opens or all retries fail
-    ▼
-[CircuitBreaker]   fallback model: llama3.2:1b
-    │  Classic CB: trips after 3 consecutive failures
-    │
-    │  ← circuit opens
-    ▼
-[Semantic Cache]   nomic-embed-text embeddings + cosine similarity (threshold 0.92)
-    │  "What is Go?" and "Explain the Go language" → same cache hit
-    │  10-minute TTL, auto-pruned
-    │
-    │  ← cache miss
-    ▼
-[Graceful Denial]  always available, never panics
+    ▼ ┌─ Transport CB (adaptive, trips at >50% error rate over 20-call window) ─┐
+      │  Hedge (1.5s delay — fires duplicate if primary is slow)                │
+      │  Retry (2× exponential backoff, 300ms base)                             │
+      └─ Primary model: llama3.2 ─────────────────────────────────────────────┘
+                │
+                │ Quality evaluation (outside transport CB — fully independent)
+                │   • Repetition score (trigram deduplication)
+                │   • Length anomaly (vs rolling baseline)
+                │   • Hallucination markers (pattern matching)
+                │   • Coherence score (cosine similarity via embeddings)
+                ▼
+         Semantic CB records score → may open independently of transport CB
+                │
+    ▼ Transport CB (classic, trips after 3 consecutive failures)
+      Fallback model: llama3.2:1b
+                │
+                │ Quality evaluation → Semantic CB for fallback
+                ▼
+    ▼ Semantic Cache
+      nomic-embed-text embeddings + cosine similarity (threshold 0.92)
+      "What is Go?" and "Explain Golang" → same cache hit
+      10-minute TTL, auto-pruned
+                │
+    ▼ Graceful Denial — always returns a message, never panics
 ```
 
 ---
 
-## Resilience primitives
+## Semantic Circuit Breaker
 
-All resilience primitives come from **[flowguard](https://github.com/yabanci/flowguard)** — an open-source Go resilience library.
+The core innovation. Two states per model, tracked independently:
 
-| Pattern | Implementation | Applied to |
+| State | Transport CB | Semantic CB |
 |---|---|---|
-| Adaptive circuit breaker | [`flowguard/circuitbreaker`](https://github.com/yabanci/flowguard/tree/main/circuitbreaker) | Primary model |
-| Classic circuit breaker | [`flowguard/circuitbreaker`](https://github.com/yabanci/flowguard/tree/main/circuitbreaker) | Fallback model |
-| Exponential retry | [`flowguard/retry`](https://github.com/yabanci/flowguard/tree/main/retry) | Primary model (2 retries) |
-| Hedged requests | [`flowguard/hedge`](https://github.com/yabanci/flowguard/tree/main/hedge) | Primary model (1.5s delay) |
-| Bulkhead | [`flowguard/bulkhead`](https://github.com/yabanci/flowguard/tree/main/bulkhead) | Interactive vs batch isolation |
-| Adaptive load shedding | [`flowguard/loadshed`](https://github.com/yabanci/flowguard/tree/main/loadshed) | All requests (AIMD algorithm) |
-| Semantic cache | cosine similarity on Ollama embeddings | Response reuse |
+| Normal | closed | healthy |
+| Model down | **open** | healthy |
+| Model degrading silently | closed | **failing** |
+| Both | open | failing |
+
+**Quality signals** (no external APIs, all local):
+
+| Signal | Method | Weight |
+|---|---|---|
+| Repetition | Trigram deduplication — detects looping responses | 0.45 |
+| Length anomaly | Deviation from rolling baseline (absolute min: 10 chars) | 0.25 |
+| Hallucination markers | 9 known refusal/hallucination phrases | 0.40 |
+| Coherence | Cosine similarity to prompt via embeddings | 0.20 |
+
+**Adaptive calibration**: the semantic CB observes the first 20 responses and automatically sets thresholds to `mean ± 1σ` and `mean ± 2σ`. A model consistently scoring 0.95 ± 0.03 gets tight thresholds (degraded < 0.92, failing < 0.89). A model scoring 0.70 ± 0.15 gets looser ones. No manual tuning.
 
 ---
 
-## Quick start
+## ReAct Agent with Tool Use
+
+`POST /react` runs a full Reason + Act loop. The LLM can invoke tools; each tool has its own circuit breaker.
+
+```
+prompt → LLM reasons → decides to call tool → tool executes → LLM processes result → ...
+              │                                        │
+         degradation chain                     tool's own CB
+         (4 tiers above)
+```
+
+Built-in tools (no external APIs):
+
+| Tool | What it does |
+|---|---|
+| `calculate` | Math expression evaluator (`2^10 + sqrt(144)`) |
+| `get_time` | Current time in any timezone |
+| `search_docs` | Searches embedded resilience knowledge base |
+| `check_system` | Returns live AgentShield metrics |
+
+---
+
+## Resilience Score
+
+A single 0–100 metric that aggregates all resilience dimensions. Updates live in the dashboard.
+
+```
+Score: 94 / 100   Grade: A
+
+  Transport Health   25 / 25   (both CBs closed)
+  Semantic Quality   23 / 25   (primary avg quality 91%)
+  Cache Efficiency   21 / 25   (38% hit rate)
+  Availability       25 / 25   (0% graceful denials)
+```
+
+During a chaos scenario: **94 → 41 → 78 → 94**. Judges can watch the number recover in real-time.
+
+---
+
+## Cost Savings
+
+Tracks estimated token costs per tier and computes savings.
+
+```
+Primary (llama3.2):   $0.0018  spent
+Fallback (llama3.2:1b): $0.0004  spent (67% cheaper per token)
+Cache:                $0.0000  spent
+
+Saved by cache:     $0.0022  (would have cost primary rate)
+Saved by fallback:  $0.0003  (delta vs primary rate)
+Total saved:        $0.0025  (52% savings rate)
+```
+
+---
+
+## Per-Request Resilience Trace
+
+Every `Ask()` and `React()` generates a trace showing exactly what happened:
+
+```json
+GET /trace/tr_a1b2c3d4
+
+{
+  "id": "tr_a1b2c3d4",
+  "prompt": "explain circuit breakers",
+  "total_ms": 1847,
+  "final_tier": "fallback",
+  "steps": [
+    {
+      "tier": "primary",
+      "latency_ms": 1230,
+      "transport_cb": "closed",
+      "semantic_cb": "failing",
+      "quality_score": 0.18,
+      "quality_signals": ["repetition", "hallucination_marker"],
+      "outcome": "semantic_failure"
+    },
+    {
+      "tier": "fallback",
+      "latency_ms": 617,
+      "transport_cb": "closed",
+      "semantic_cb": "healthy",
+      "quality_score": 0.91,
+      "outcome": "success"
+    }
+  ]
+}
+```
+
+Trace ID is included in every response. Clickable `📋 trace` link in the dashboard.
+
+---
+
+## Webhook Notifications
+
+Configure a webhook to receive alerts when circuit breaker states change:
+
+```bash
+POST /config/webhook
+{"url": "https://your-ops-system/alert"}
+```
+
+Payload on state change:
+```json
+{
+  "event": "semantic_cb_failing",
+  "model": "primary",
+  "prev_state": "degraded",
+  "new_state": "failing",
+  "reason": "rolling avg quality 38% < failing threshold 45%",
+  "avg_quality": 0.38,
+  "timestamp": "2026-04-30T14:32:01Z"
+}
+```
+
+---
+
+## Streaming Quality Gate
+
+`GET /chat/stream` streams tokens via SSE with an inline quality gate.  
+If hallucination markers are detected in the first 120 tokens, the stream aborts and continues from fallback — automatically.
+
+```
+[token1][token2]...[token47]  ← from primary
+⚡ quality gate triggered at token 47 — switching to fallback
+[token1][token2]...           ← from fallback
+```
+
+---
+
+## Quick Start
 
 ```bash
 # 1. Install Ollama
 brew install ollama
 
-# 2. Pull models (one-time, ~4GB total)
+# 2. Pull models (~4GB total)
 ollama pull llama3.2
 ollama pull llama3.2:1b
-ollama pull nomic-embed-text
+ollama pull nomic-embed-text   # for semantic cache + quality coherence
 
 # 3. Start Ollama
 ollama serve
 
 # 4. Run AgentShield
-go run .
+OLLAMA_URL=http://localhost:11434 go run .
 
 # 5. Open dashboard
 open http://localhost:8080
@@ -82,70 +249,108 @@ open http://localhost:8080
 
 ---
 
-## Live demo
+## Demo Scenarios
 
-The dashboard has one-click failure injection:
-
-1. Send a prompt → **primary** tier responds
-2. **Kill Primary** → next prompt routes to **fallback**
-3. Ask the same prompt → returns from **semantic cache** (instant)
-4. **Kill Fallback** too → graceful denial message
-5. **Restore Primary** → circuit recovers automatically after 15s probe
-
-Toggle **Streaming mode** to see tokens appear in real-time via SSE.
-
----
-
-## API
-
+### Scenario 1: Transport failure
 ```
-POST /chat                     {"prompt": "..."}
-GET  /chat/stream?prompt=...   SSE token stream
-GET  /status                   live snapshot of all resilience layers
-POST /demo/kill                simulate primary failure
-POST /demo/restore             restore primary
-POST /demo/kill-fallback       simulate fallback failure
-POST /demo/restore-fallback    restore fallback
-GET  /metrics                  Prometheus metrics
-GET  /health                   Ollama reachability
+1. Send prompts → Resilience Score: 94, primary responds
+2. POST /demo/kill → primary killed
+3. Next prompt → fallback takes over (transport CB)
+4. POST /demo/restore → auto-recovery
 ```
 
-**Batch priority** (lower concurrency quota):
+### Scenario 2: Semantic degradation (the unique demo)
 ```
-POST /chat
-X-Priority: batch
+1. Send prompts → Score 94, primary quality ~91%
+2. POST /demo/degrade → primary returns garbage (HTTP 200 ✓)
+3. Quality score drops → semantic CB opens
+4. Transport CB stays CLOSED — HTTP was never the problem
+5. POST /demo/restore-quality → semantic CB recovers
+```
+
+### Scenario 3: Automated chaos
+```
+POST /demo/chaos  →  Watch Score drop from 94 → 41 → 94 automatically
+                     4 scripted phases, all tiers exercised
 ```
 
 ---
 
-## Prometheus metrics
+## API Reference
 
 ```
-agentshield_requests_total{tier}             counter
-agentshield_request_duration_seconds{tier}   histogram
-agentshield_cb_state{model}                  gauge (0=closed 1=half-open 2=open)
-agentshield_cache_size                       gauge
-agentshield_cache_hits_total                 counter
-agentshield_loadshed_total                   counter
-agentshield_bulkhead_full_total{type}        counter
-agentshield_hedge_fires_total                counter
+POST /chat                         {"prompt": "..."}
+POST /chat           (batch)       X-Priority: batch
+GET  /chat/stream?prompt=...       SSE streaming with quality gate
+POST /react                        {"prompt": "...", "session_id": "..."}
+
+GET  /status                       full live snapshot
+GET  /trace/{id}                   per-request resilience trace
+GET  /metrics                      Prometheus metrics
+GET  /health                       Ollama reachability
+
+GET  /sessions                     list active sessions
+GET  /sessions/{id}                session message history
+DELETE /sessions/{id}              clear session
+
+POST /demo/kill                    simulate primary transport failure
+POST /demo/restore
+POST /demo/kill-fallback           simulate fallback transport failure
+POST /demo/restore-fallback
+POST /demo/degrade                 simulate primary quality degradation
+POST /demo/restore-quality
+GET  /demo/chaos/stream            SSE stream of automated chaos scenario
+
+POST /config/webhook               {"url": "..."}
+GET  /config/webhook
+DELETE /config/webhook
 ```
 
 ---
 
-## Project structure
+## Prometheus Metrics
 
 ```
-main.go              HTTP server, graceful shutdown
+agentshield_requests_total{tier}               counter
+agentshield_request_duration_seconds{tier}     histogram (p50/p95/p99)
+agentshield_cb_state{model}                    gauge  0=closed 1=half-open 2=open
+agentshield_semantic_cb_state{model}           gauge  0=healthy 1=degraded 2=failing
+agentshield_quality_score{model}               gauge  0.0–1.0
+agentshield_cache_size                         gauge
+agentshield_cache_hits_total                   counter
+agentshield_loadshed_total                     counter
+agentshield_bulkhead_full_total{type}          counter
+agentshield_hedge_fires_total                  counter
+```
+
+---
+
+## Project Structure
+
+```
+main.go                   HTTP server, graceful shutdown
 agent/
-  agent.go           Degradation chain orchestration
-  ollama.go          Ollama HTTP client (generate, stream, embed)
-  cache.go           Semantic cache (cosine similarity + exact fallback)
-  metrics.go         Prometheus metric definitions
-  agent_test.go      Unit tests with mock Ollama server
+  agent.go                Degradation chain + all public API
+  ollama.go               Ollama HTTP client (generate, stream, embed)
+  cache.go                Semantic cache (cosine sim + exact fallback)
+  quality.go              Quality evaluator (4 signals, no external APIs)
+  semantic_breaker.go     Semantic circuit breaker (adaptive calibration)
+  cost.go                 Token estimation + cost savings tracking
+  score.go                Resilience Score (0–100 composite)
+  react.go                ReAct agent loop
+  tool.go                 Built-in tools + expression evaluator
+  session.go              Conversation session store (TTL eviction)
+  trace.go                Per-request resilience trace store
+  webhook.go              Webhook dispatcher for CB state changes
+  chaos.go                Automated chaos scenario runner
+  metrics.go              Prometheus metric definitions
+  *_test.go               Unit tests (mock Ollama server, no real LLM needed)
 api/
-  handler.go         HTTP route handlers + SSE streaming
-  dashboard.go       Single-page dashboard (Chart.js)
+  handler.go              All HTTP route handlers + SSE
+  dashboard.go            Single-page dashboard (Chart.js, no build step)
+truefoundry/
+  deploy.py               TrueFoundry Python SDK deployment
+  service.yaml            TrueFoundry YAML manifest
 ```
 
 ---
@@ -153,45 +358,36 @@ api/
 ## Tests
 
 ```bash
-go test ./...
+go test ./...                   # all tests
+go test -race ./...             # with race detector
+go test -race -count=5 ./...    # stress test
 ```
 
 All tests use `httptest.Server` — no running Ollama required.
+
+---
+
+## Docker
+
+```bash
+docker compose up          # builds and starts AgentShield
+                           # Ollama must run natively (Metal GPU)
+```
+
+`OLLAMA_URL` defaults to `http://host.docker.internal:11434` in the Docker image.
 
 ---
 
 ## Deploy to TrueFoundry
 
-AgentShield deploys natively to TrueFoundry in 3 commands:
-
 ```bash
-# 1. Install TrueFoundry CLI
 pip install truefoundry
-
-# 2. Login and create the Ollama URL secret
 tfy login
-tfy secret create --name OLLAMA_URL --value "http://<your-ollama-host>:11434"
-
-# 3. Deploy
-python truefoundry/deploy.py --workspace <YOUR_WORKSPACE_FQN>
+tfy secret create --name OLLAMA_URL --value "http://<ollama-host>:11434"
+python truefoundry/deploy.py --workspace <WORKSPACE_FQN>
 ```
 
-Or apply the YAML manifest directly:
-```bash
-tfy apply -f truefoundry/service.yaml --workspace <YOUR_WORKSPACE_FQN>
-```
-
-AgentShield exposes `/health` for liveness/readiness probes and `/metrics` for Prometheus scraping — both are wired into the TrueFoundry service manifest.
-
----
-
-## Tests
-
-```bash
-go test ./...
-```
-
-All tests use `httptest.Server` — no running Ollama required.
+AgentShield exposes `/health` for liveness/readiness probes and `/metrics` for Prometheus — both wired into the service manifest.
 
 ---
 
@@ -199,4 +395,4 @@ All tests use `httptest.Server` — no running Ollama required.
 
 Built for the [TrueFoundry Resilient Agents Challenge](https://devnetwork-ai-ml-hack-2026.devpost.com/) — DevNetwork AI+ML Hackathon 2026.
 
-Resilience library: [github.com/yabanci/flowguard](https://github.com/yabanci/flowguard)
+Resilience library: **[github.com/yabanci/flowguard](https://github.com/yabanci/flowguard)**
