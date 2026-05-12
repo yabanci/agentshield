@@ -22,12 +22,6 @@ func TestChaos_KillRestorePrimary(t *testing.T) {
 	}
 }
 
-type nilProvider struct{}
-
-func (nilProvider) Generate(_ any, _ provider.Request) (provider.Response, error) {
-	return provider.Response{}, nil
-}
-
 func TestChaos_DegradeRoutesToWrapper(t *testing.T) {
 	// Use a concrete DegradedWrapper around a stub LLMProvider via a separate Test
 	// because LLMProvider needs a full interface implementation; here we just verify

@@ -86,11 +86,10 @@ type Status struct {
 type Agent struct {
 	lifeCtx        context.Context
 	lifeCancel     context.CancelFunc
-	primary         provider.LLMProvider
-	fallback        provider.LLMProvider
-	embedder        provider.Embedder
-	degradedPrimary *provider.DegradedWrapper
-	breakers       *orchestrator.BreakerSet
+	primary   provider.LLMProvider
+	fallback  provider.LLMProvider
+	embedder  provider.Embedder
+	breakers  *orchestrator.BreakerSet
 	qualityEval    *quality.QualityEvaluator
 	hedger         *hedge.Hedge
 	interactiveBH  *bulkhead.Bulkhead
