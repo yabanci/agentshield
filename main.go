@@ -11,25 +11,27 @@ import (
 
 	"github.com/yabanci/agentshield/agent"
 	"github.com/yabanci/agentshield/api"
+	"github.com/yabanci/agentshield/config"
 )
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	a := agent.New()
+	cfg, err := config.LoadFromEnv()
+	if err != nil {
+		logger.Error("config load failed", "err", err)
+		os.Exit(1)
+	}
+
+	a := agent.NewWithConfig(cfg)
 	defer a.Stop()
-	h := api.New(a)
+	h := api.New(a, cfg)
 
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
 	srv := &http.Server{
-		Addr:         ":" + port,
+		Addr:         ":" + cfg.Port,
 		Handler:      mux,
 		ReadTimeout:  70 * time.Second,
 		WriteTimeout: 70 * time.Second,
@@ -37,7 +39,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("AgentShield started", "addr", "http://localhost:"+port)
+		logger.Info("AgentShield started", "addr", "http://localhost:"+cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", "err", err)
 			os.Exit(1)

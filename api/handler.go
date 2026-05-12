@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/config"
 )
 
 // MaxPromptBytes caps incoming prompts to prevent memory blow-up from
@@ -40,11 +41,12 @@ func validatePrompt(prompt string) (int, string, bool) {
 // Handler holds all HTTP route handlers.
 type Handler struct {
 	agent     *agent.Agent
+	cfg       *config.Config
 	ipLimiter *ipLimiter
 }
 
-func New(a *agent.Agent) *Handler {
-	return &Handler{agent: a, ipLimiter: newIPLimiter()}
+func New(a *agent.Agent, cfg *config.Config) *Handler {
+	return &Handler{agent: a, cfg: cfg, ipLimiter: newIPLimiter()}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -69,14 +71,14 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	// Demo controls (auth-gated when AGENTSHIELD_AUTH_TOKEN is set)
-	mux.HandleFunc("POST /demo/kill", requireAuth(h.killPrimary))
-	mux.HandleFunc("POST /demo/restore", requireAuth(h.restorePrimary))
-	mux.HandleFunc("POST /demo/kill-fallback", requireAuth(h.killFallback))
-	mux.HandleFunc("POST /demo/restore-fallback", requireAuth(h.restoreFallback))
-	mux.HandleFunc("POST /demo/chaos", requireAuth(h.startChaos))
-	mux.HandleFunc("GET /demo/chaos/stream", requireAuth(h.chaosStream))
-	mux.HandleFunc("POST /demo/degrade", requireAuth(h.enableDegrade))
-	mux.HandleFunc("POST /demo/restore-quality", requireAuth(h.disableDegrade))
+	mux.HandleFunc("POST /demo/kill", h.requireAuth(h.killPrimary))
+	mux.HandleFunc("POST /demo/restore", h.requireAuth(h.restorePrimary))
+	mux.HandleFunc("POST /demo/kill-fallback", h.requireAuth(h.killFallback))
+	mux.HandleFunc("POST /demo/restore-fallback", h.requireAuth(h.restoreFallback))
+	mux.HandleFunc("POST /demo/chaos", h.requireAuth(h.startChaos))
+	mux.HandleFunc("GET /demo/chaos/stream", h.requireAuth(h.chaosStream))
+	mux.HandleFunc("POST /demo/degrade", h.requireAuth(h.enableDegrade))
+	mux.HandleFunc("POST /demo/restore-quality", h.requireAuth(h.disableDegrade))
 
 	// Auth discovery for the dashboard
 	mux.HandleFunc("GET /auth/required", h.authRequired)
@@ -85,9 +87,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /trace/{id}", h.getTrace)
 
 	// Webhook config (auth-gated)
-	mux.HandleFunc("POST /config/webhook", requireAuth(h.setWebhook))
+	mux.HandleFunc("POST /config/webhook", h.requireAuth(h.setWebhook))
 	mux.HandleFunc("GET /config/webhook", h.getWebhook)
-	mux.HandleFunc("DELETE /config/webhook", requireAuth(h.clearWebhook))
+	mux.HandleFunc("DELETE /config/webhook", h.requireAuth(h.clearWebhook))
 
 	// Dashboard
 	mux.HandleFunc("GET /", h.dashboard)
@@ -368,7 +370,7 @@ func (h *Handler) setWebhook(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "url is required", http.StatusBadRequest)
 		return
 	}
-	if err := validateWebhookURL(body.URL); err != nil {
+	if err := validateWebhookURL(body.URL, h.cfg); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -387,7 +389,7 @@ func (h *Handler) getWebhook(w http.ResponseWriter, r *http.Request) {
 
 // authRequired tells the dashboard whether bearer-token auth is enabled.
 func (h *Handler) authRequired(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]bool{"required": AuthEnabled()})
+	jsonOK(w, map[string]bool{"required": h.AuthEnabled()})
 }
 
 func (h *Handler) clearWebhook(w http.ResponseWriter, r *http.Request) {

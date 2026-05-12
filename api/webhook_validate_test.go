@@ -3,47 +3,57 @@ package api
 import (
 	"strings"
 	"testing"
+
+	"github.com/yabanci/agentshield/config"
 )
 
+// cfg helpers reduce noise across cases.
+func cfgDefault() *config.Config { return config.Defaults() }
+func cfgAllowHTTP() *config.Config {
+	c := config.Defaults()
+	c.Webhook.AllowHTTP = true
+	return c
+}
+func cfgAllowPrivate() *config.Config {
+	c := config.Defaults()
+	c.Webhook.AllowPrivate = true
+	c.Webhook.AllowHTTP = true
+	return c
+}
+
 func TestWebhookValidate_AllowsHTTPS(t *testing.T) {
-	t.Setenv("AGENTSHIELD_ALLOW_HTTP_WEBHOOK", "")
-	t.Setenv("AGENTSHIELD_ALLOW_PRIVATE_WEBHOOK", "")
-	if err := validateWebhookURL("https://example.com/hook"); err != nil {
+	if err := validateWebhookURL("https://example.com/hook", cfgDefault()); err != nil {
 		t.Errorf("https://example.com should be allowed, got: %v", err)
 	}
 }
 
 func TestWebhookValidate_RejectsHTTPByDefault(t *testing.T) {
-	t.Setenv("AGENTSHIELD_ALLOW_HTTP_WEBHOOK", "")
-	err := validateWebhookURL("http://example.com/hook")
+	err := validateWebhookURL("http://example.com/hook", cfgDefault())
 	if err == nil {
-		t.Error("http:// should be rejected without ALLOW_HTTP_WEBHOOK env")
+		t.Error("http:// should be rejected without Webhook.AllowHTTP")
 	}
 }
 
 func TestWebhookValidate_AllowsHTTPWhenEnabled(t *testing.T) {
-	t.Setenv("AGENTSHIELD_ALLOW_HTTP_WEBHOOK", "true")
-	t.Setenv("AGENTSHIELD_ALLOW_PRIVATE_WEBHOOK", "")
-	if err := validateWebhookURL("http://example.com/hook"); err != nil {
-		t.Errorf("http:// should be allowed with env override, got: %v", err)
+	if err := validateWebhookURL("http://example.com/hook", cfgAllowHTTP()); err != nil {
+		t.Errorf("http:// should be allowed with cfg override, got: %v", err)
 	}
 }
 
 func TestWebhookValidate_RejectsPrivateIPs(t *testing.T) {
-	t.Setenv("AGENTSHIELD_ALLOW_PRIVATE_WEBHOOK", "")
 	cases := []string{
-		"https://10.0.0.1/hook",       // private RFC1918
-		"https://192.168.1.1/hook",    // private RFC1918
-		"https://172.16.0.1/hook",     // private RFC1918
-		"https://127.0.0.1/hook",      // loopback
-		"https://localhost/hook",      // loopback hostname
-		"https://0.0.0.0/hook",        // unspecified
-		"https://169.254.0.1/hook",    // link-local
+		"https://10.0.0.1/hook",             // private RFC1918
+		"https://192.168.1.1/hook",          // private RFC1918
+		"https://172.16.0.1/hook",           // private RFC1918
+		"https://127.0.0.1/hook",            // loopback
+		"https://localhost/hook",            // loopback hostname
+		"https://0.0.0.0/hook",              // unspecified
+		"https://169.254.0.1/hook",          // link-local
 		"https://host.docker.internal/hook", // explicit docker
 	}
 	for _, u := range cases {
 		t.Run(u, func(t *testing.T) {
-			if err := validateWebhookURL(u); err == nil {
+			if err := validateWebhookURL(u, cfgDefault()); err == nil {
 				t.Errorf("%s should be rejected as private", u)
 			}
 		})
@@ -51,9 +61,7 @@ func TestWebhookValidate_RejectsPrivateIPs(t *testing.T) {
 }
 
 func TestWebhookValidate_AllowsPrivateWhenEnabled(t *testing.T) {
-	t.Setenv("AGENTSHIELD_ALLOW_PRIVATE_WEBHOOK", "true")
-	t.Setenv("AGENTSHIELD_ALLOW_HTTP_WEBHOOK", "true")
-	if err := validateWebhookURL("http://127.0.0.1:8080/hook"); err != nil {
+	if err := validateWebhookURL("http://127.0.0.1:8080/hook", cfgAllowPrivate()); err != nil {
 		t.Errorf("private IP should be allowed in dev mode, got: %v", err)
 	}
 }
@@ -68,7 +76,7 @@ func TestWebhookValidate_RejectsBadSchemes(t *testing.T) {
 	}
 	for _, u := range cases {
 		t.Run(u, func(t *testing.T) {
-			if err := validateWebhookURL(u); err == nil {
+			if err := validateWebhookURL(u, cfgDefault()); err == nil {
 				t.Errorf("%s should be rejected (bad scheme)", u)
 			}
 		})
@@ -76,27 +84,24 @@ func TestWebhookValidate_RejectsBadSchemes(t *testing.T) {
 }
 
 func TestWebhookValidate_RejectsMalformed(t *testing.T) {
-	if err := validateWebhookURL(""); err == nil {
+	if err := validateWebhookURL("", cfgDefault()); err == nil {
 		t.Error("empty URL should be rejected")
 	}
 	// "://no-scheme" parses without error in Go but has empty scheme — should reject.
-	err := validateWebhookURL("://no-scheme")
+	err := validateWebhookURL("://no-scheme", cfgDefault())
 	if err == nil || !strings.Contains(err.Error(), "scheme") {
 		t.Errorf("URL without scheme should fail with scheme error, got: %v", err)
 	}
 }
 
 func TestWebhookValidate_RejectsMissingHost(t *testing.T) {
-	t.Setenv("AGENTSHIELD_ALLOW_HTTP_WEBHOOK", "true")
-	t.Setenv("AGENTSHIELD_ALLOW_PRIVATE_WEBHOOK", "")
-	err := validateWebhookURL("http:///path")
+	err := validateWebhookURL("http:///path", cfgAllowHTTP())
 	if err == nil {
 		t.Error("URL without host should be rejected")
 	}
 }
 
 func TestWebhookValidate_AcceptsPublicHostnames(t *testing.T) {
-	t.Setenv("AGENTSHIELD_ALLOW_PRIVATE_WEBHOOK", "")
 	cases := []string{
 		"https://hooks.slack.com/services/T00/B00/xxx",
 		"https://discord.com/api/webhooks/123/abc",
@@ -104,7 +109,7 @@ func TestWebhookValidate_AcceptsPublicHostnames(t *testing.T) {
 	}
 	for _, u := range cases {
 		t.Run(u, func(t *testing.T) {
-			if err := validateWebhookURL(u); err != nil {
+			if err := validateWebhookURL(u, cfgDefault()); err != nil {
 				t.Errorf("public hostname should be allowed: %v", err)
 			}
 		})

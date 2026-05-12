@@ -1,33 +1,30 @@
 // auth.go — bearer-token authentication for sensitive endpoints.
 //
-// If AGENTSHIELD_AUTH_TOKEN is set, /demo/* and /config/* require the token.
-// If unset, those endpoints are open (preserves dev experience).
+// When cfg.AuthToken is set, /demo/* and /config/* require the token.
+// When unset, those endpoints are open (preserves dev experience).
 package api
 
 import (
 	"crypto/subtle"
 	"net/http"
-	"os"
 	"strings"
 )
 
-const authEnvVar = "AGENTSHIELD_AUTH_TOKEN"
-
 // authToken returns the configured token, or "" if auth is disabled.
-func authToken() string {
-	return os.Getenv(authEnvVar)
+func (h *Handler) authToken() string {
+	return h.cfg.AuthToken
 }
 
 // AuthEnabled reports whether bearer-token auth is required.
-func AuthEnabled() bool {
-	return authToken() != ""
+func (h *Handler) AuthEnabled() bool {
+	return h.authToken() != ""
 }
 
 // requireAuth wraps a handler with bearer-token validation when auth is on.
-// When AGENTSHIELD_AUTH_TOKEN is unset, it acts as a no-op (open access).
-func requireAuth(next http.HandlerFunc) http.HandlerFunc {
+// When cfg.AuthToken is empty, it acts as a no-op (open access).
+func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := authToken()
+		token := h.authToken()
 		if token == "" {
 			next(w, r)
 			return

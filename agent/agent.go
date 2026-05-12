@@ -15,7 +15,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -25,6 +24,8 @@ import (
 	"github.com/yabanci/flowguard/hedge"
 	"github.com/yabanci/flowguard/loadshed"
 	"github.com/yabanci/flowguard/retry"
+
+	"github.com/yabanci/agentshield/config"
 )
 
 const (
@@ -178,13 +179,21 @@ func newAgent(ollamaURL string) *Agent {
 	return a
 }
 
-// New creates an Agent. Uses OLLAMA_URL env var if set, otherwise localhost.
+// New creates an Agent by loading config from environment.
+// Convenience wrapper for callers that don't yet hold a *config.Config.
+// Panics on invalid config — startup-time failure is preferable to runtime surprises.
 func New() *Agent {
-	url := os.Getenv("OLLAMA_URL")
-	if url == "" {
-		url = ollamaBaseURL
+	cfg, err := config.LoadFromEnv()
+	if err != nil {
+		panic("agentshield config: " + err.Error())
 	}
-	return newAgent(url)
+	return NewWithConfig(cfg)
+}
+
+// NewWithConfig creates an Agent from an explicit Config.
+// Preferred form for production wiring.
+func NewWithConfig(cfg *config.Config) *Agent {
+	return newAgent(cfg.Provider.BaseURL)
 }
 
 // NewWithOllamaURL creates an Agent for testing — no background cleanup goroutines.
