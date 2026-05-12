@@ -26,6 +26,7 @@ import (
 	"github.com/yabanci/flowguard/retry"
 
 	"github.com/yabanci/agentshield/config"
+	"github.com/yabanci/agentshield/provider"
 )
 
 const (
@@ -79,7 +80,9 @@ type Status struct {
 type Agent struct {
 	lifeCtx        context.Context
 	lifeCancel     context.CancelFunc
-	ollama         *ollamaClient
+	primary        provider.LLMProvider
+	fallback       provider.LLMProvider
+	embedder       provider.Embedder
 	primaryCB      *circuitbreaker.Breaker
 	fallbackCB     *circuitbreaker.Breaker
 	primarySemCB   *SemanticBreaker
@@ -105,15 +108,18 @@ type Agent struct {
 }
 
 func newAgent(ollamaURL string) *Agent {
-	ol := &ollamaClient{
-		http:    newHTTPClient(),
-		baseURL: ollamaURL,
-	}
+	ol := provider.NewOllama(config.ProviderConfig{
+		Kind:    "ollama",
+		BaseURL: ollamaURL,
+		Timeout: 60 * time.Second,
+	})
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	a := &Agent{
 		lifeCtx:    lifeCtx,
 		lifeCancel: lifeCancel,
-		ollama:     ol,
+		primary:    ol,
+		fallback:   ol,
+		embedder:   ol,
 		primaryCB: circuitbreaker.NewAdaptive(
 			20, 0.5, 5,
 			circuitbreaker.WithOpenTimeout(15*time.Second),
@@ -171,8 +177,8 @@ func newAgent(ollamaURL string) *Agent {
 	a.costs = newCostTracker()
 	a.latency = newLatencyTracker()
 	a.scoreHistory = newScoreHistory(60)
-	a.qualityEval = newQualityEvaluator(ol.embed)
-	a.cache = newSemanticCache(10*time.Minute, ol.embed)
+	a.qualityEval = newQualityEvaluator(a.embedder.Embed)
+	a.cache = newSemanticCache(10*time.Minute, a.embedder.Embed)
 	a.tools = newToolRegistry(a)
 	a.sessions = newSessionStore()
 	a.traces = newTraceStore()
@@ -456,7 +462,8 @@ func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *Trace) (stri
 
 	var result string
 	err := a.fallbackCB.Do(ctx, func(ctx context.Context) error {
-		text, err := a.ollama.generate(ctx, ModelFallback, prompt)
+		r, err := a.fallback.Generate(ctx, provider.Request{Model: ModelFallback, Prompt: prompt})
+		text := r.Text
 		if err != nil {
 			return err
 		}
@@ -476,13 +483,17 @@ func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *Trace) (stri
 	return result, true
 }
 
-// generate is a wrapper around ollama.generate that injects degraded
-// responses when degrade mode is active (demo only).
+// generate is a wrapper around the primary provider's Generate that injects
+// degraded responses when degrade mode is active (demo only).
 func (a *Agent) generate(ctx context.Context, model, prompt string) (string, error) {
 	if a.degradeMode.Load() && model == ModelPrimary {
 		return degradedResponse(prompt), nil
 	}
-	return a.ollama.generate(ctx, model, prompt)
+	r, err := a.primary.Generate(ctx, provider.Request{Model: model, Prompt: prompt})
+	if err != nil {
+		return "", err
+	}
+	return r.Text, nil
 }
 
 // degradedResponse returns a low-quality response that reliably scores below
@@ -525,11 +536,14 @@ func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out ch
 		// when the quality gate trips without leaking the stream goroutine.
 		streamCtx, cancelStream := context.WithCancel(ctx)
 		rawTokens := make(chan string, 64)
-		var streamErr error
+		// errCh creates a happens-before edge between the streamer goroutine
+		// finishing and the consumer reading streamErr. Without this, the race
+		// detector flags a read/write race on a plain `streamErr` variable.
+		errCh := make(chan error, 1)
 
+		// provider.LLMProvider.Stream owns closing rawTokens (per its contract).
 		go func() {
-			defer close(rawTokens)
-			streamErr = a.ollama.stream(streamCtx, ModelPrimary, prompt, rawTokens)
+			errCh <- a.primary.Stream(streamCtx, provider.Request{Model: ModelPrimary, Prompt: prompt}, rawTokens)
 		}()
 
 		var buf strings.Builder
@@ -545,8 +559,9 @@ func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out ch
 				hallScore, reason := hallucinationScore(buf.String())
 				if hallScore < 0.5 {
 					tripped = true
-					cancelStream()           // abort primary stream
-					for range rawTokens {}   // drain so goroutine can exit
+					cancelStream() // abort primary stream
+					for range rawTokens {
+					} // drain so goroutine can exit
 					out <- StreamToken{Switched: true, Tier: TierFallback,
 						Reason: "quality gate: " + reason}
 					break
@@ -556,16 +571,17 @@ func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out ch
 		}
 		cancelStream() // no-op if already cancelled; always call to free resources
 
+		streamErr := <-errCh
 		if !tripped && streamErr == nil {
 			return TierPrimary, nil
 		}
 	}
 
-	// Fallback stream (no quality gate — fallback must always complete)
+	// Fallback stream (no quality gate — fallback must always complete).
+	// Provider closes rawTokens per LLMProvider contract.
 	rawTokens := make(chan string, 64)
 	go func() {
-		defer close(rawTokens)
-		_ = a.ollama.stream(ctx, ModelFallback, prompt, rawTokens)
+		_ = a.fallback.Stream(ctx, provider.Request{Model: ModelFallback, Prompt: prompt}, rawTokens)
 	}()
 	for token := range rawTokens {
 		out <- StreamToken{Token: token, Tier: TierFallback}
@@ -656,7 +672,7 @@ func (a *Agent) Status() Status {
 
 // Ping checks if Ollama is reachable.
 func (a *Agent) Ping(ctx context.Context) error {
-	if err := a.ollama.ping(ctx); err != nil {
+	if err := a.primary.Ping(ctx); err != nil {
 		return fmt.Errorf("ollama unreachable: %w", err)
 	}
 	return nil
