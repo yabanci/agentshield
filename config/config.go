@@ -4,6 +4,7 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -78,8 +79,32 @@ type ScoreConfig struct {
 	Weights          map[string]int
 }
 
-// Validate returns nil for now; F1.6 fills in real checks.
-func (c *Config) Validate() error { return nil }
+// Validate fails fast on misconfigurations that would only surface at request time.
+func (c *Config) Validate() error {
+	if c.Limits.InteractiveSlots <= 0 {
+		return fmt.Errorf("Limits.InteractiveSlots must be > 0, got %d", c.Limits.InteractiveSlots)
+	}
+	if c.Limits.BatchSlots <= 0 {
+		return fmt.Errorf("Limits.BatchSlots must be > 0, got %d", c.Limits.BatchSlots)
+	}
+	if c.Limits.LoadshedStart <= 0 {
+		return fmt.Errorf("Limits.LoadshedStart must be > 0, got %d", c.Limits.LoadshedStart)
+	}
+	if c.Limits.PrimaryCBErrorRate <= 0 || c.Limits.PrimaryCBErrorRate >= 1 {
+		return fmt.Errorf("Limits.PrimaryCBErrorRate must be in (0,1), got %v", c.Limits.PrimaryCBErrorRate)
+	}
+	if c.Score.LatencyP95Target <= 0 {
+		return fmt.Errorf("Score.LatencyP95Target must be > 0, got %v", c.Score.LatencyP95Target)
+	}
+	sum := 0
+	for _, w := range c.Score.Weights {
+		sum += w
+	}
+	if sum != 100 {
+		return fmt.Errorf("Score.Weights must sum to 100, got %d", sum)
+	}
+	return nil
+}
 
 // Defaults returns a Config populated with safe production defaults.
 // Validate is NOT called here — caller must invoke Validate after merging env.

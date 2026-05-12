@@ -149,3 +149,33 @@ func TestLoadFromEnv_NoOverridesUsesDefaults(t *testing.T) {
 		t.Errorf("Port = %q, want default 8080", c.Port)
 	}
 }
+
+func TestValidate_RejectsBadScoreWeights(t *testing.T) {
+	c := Defaults()
+	c.Score.Weights = map[string]int{"transport": 50, "quality": 30}
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected validation error for weights summing to 80, got nil")
+	}
+}
+
+func TestValidate_RejectsZeroBulkhead(t *testing.T) {
+	c := Defaults()
+	c.Limits.InteractiveSlots = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected error for InteractiveSlots=0")
+	}
+}
+
+func TestValidate_RejectsNegativeLatencyTarget(t *testing.T) {
+	c := Defaults()
+	c.Score.LatencyP95Target = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected error for LatencyP95Target=0")
+	}
+}
+
+func TestValidate_PassesOnDefaults(t *testing.T) {
+	if err := Defaults().Validate(); err != nil {
+		t.Fatalf("Defaults() should validate cleanly, got %v", err)
+	}
+}
