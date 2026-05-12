@@ -120,18 +120,27 @@ Built-in tools (no external APIs):
 
 ## Resilience Score
 
-A single 0–100 metric that aggregates all resilience dimensions. Updates live in the dashboard.
+A single 0–100 metric that aggregates all resilience dimensions. Five components, 20 points each. Updates live in the dashboard.
 
 ```
-Score: 94 / 100   Grade: A
+Score: 95 / 100   Grade: A
 
-  Transport Health   25 / 25   (both CBs closed)
-  Semantic Quality   23 / 25   (primary avg quality 91%)
-  Cache Efficiency   21 / 25   (38% hit rate)
-  Availability       25 / 25   (0% graceful denials)
+  Transport Health   20 / 20   (both CBs closed)
+  Semantic Quality   18 / 20   (primary avg quality 91%)
+  Cache Efficiency   17 / 20   (38% hit rate + cost savings)
+  Availability       20 / 20   (0% graceful denials)
+  Latency            20 / 20   (primary p95 < 1s)
 ```
 
-During a chaos scenario: **94 → 41 → 78 → 94**. Judges can watch the number recover in real-time.
+| Component | Source | Max |
+|---|---|---|
+| Transport Health | transport CB state (primary + fallback) | 20 |
+| Semantic Quality | semantic CB state (primary 12pts, fallback 8pts) | 20 |
+| Cache Efficiency | cache fill ratio + cost-savings bonus | 20 |
+| Availability | served-vs-denied ratio | 20 |
+| Latency | primary p95 latency bands (< 1s → 20, < 3s → 16, …) | 20 |
+
+During a chaos scenario: **100 → 41 → 78 → 95**. Judges can watch the number recover in real-time as each component heals.
 
 ---
 
