@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/yabanci/agentshield/memory"
 )
 
 const maxReactIterations = 6
@@ -51,8 +53,8 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 
 	// done wraps every return path: finalizes the trace and sets TraceID.
 	done := func(answer string, turns int, tier Tier) ReactResponse {
-		a.sessions.Add(sessionID, Message{Role: "assistant", Content: answer, Tier: tier, At: nowFn()})
-		tr.finalize(tier)
+		a.sessions.Add(sessionID, memory.Message{Role: "assistant", Content: answer, Tier: tier, At: nowFn()})
+		tr.Finalize(tier)
 		return ReactResponse{
 			Answer:    answer,
 			Steps:     steps,
@@ -63,12 +65,12 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 		}
 	}
 
-	a.sessions.Add(sessionID, Message{Role: "user", Content: prompt, At: nowFn()})
+	a.sessions.Add(sessionID, memory.Message{Role: "user", Content: prompt, At: nowFn()})
 
 	for i := 0; i < maxReactIterations; i++ {
 		resp, err := a.degrade(ctx, conversationCtx, tr)
 		if err != nil {
-			tr.finalize(TierDegraded)
+			tr.Finalize(TierDegraded)
 			return ReactResponse{}, fmt.Errorf("react llm call failed: %w", err)
 		}
 		lastTier = resp.Tier
@@ -186,7 +188,7 @@ func marshalArgs(args map[string]any) string {
 	return string(b)
 }
 
-func buildHistory(messages []Message) string {
+func buildHistory(messages []memory.Message) string {
 	if len(messages) == 0 {
 		return ""
 	}

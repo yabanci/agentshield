@@ -1,5 +1,5 @@
 // score_history.go — rolling buffer of recent Resilience Score snapshots.
-package agent
+package memory
 
 import (
 	"sync"
@@ -24,7 +24,7 @@ type ScoreHistory struct {
 	minGap   time.Duration
 }
 
-func newScoreHistory(capacity int) *ScoreHistory {
+func NewScoreHistory(capacity int) *ScoreHistory {
 	return &ScoreHistory{
 		points:   make([]ScorePoint, capacity),
 		capacity: capacity,
@@ -34,13 +34,13 @@ func newScoreHistory(capacity int) *ScoreHistory {
 
 // NewTestScoreHistory creates a ScoreHistory with the production 1-second throttle.
 func NewTestScoreHistory(capacity int) *ScoreHistory {
-	return newScoreHistory(capacity)
+	return NewScoreHistory(capacity)
 }
 
 // NewTestScoreHistoryFast creates a ScoreHistory with no throttle — for tests
 // that need to inject many samples back-to-back.
 func NewTestScoreHistoryFast(capacity int) *ScoreHistory {
-	h := newScoreHistory(capacity)
+	h := NewScoreHistory(capacity)
 	h.minGap = 0
 	return h
 }

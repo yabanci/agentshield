@@ -1,14 +1,14 @@
-package agent_test
+package memory_test
 
 import (
 	"testing"
 	"time"
 
-	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/memory"
 )
 
 func TestSessionStore_GetOrCreate(t *testing.T) {
-	store := agent.NewTestSessionStore()
+	store := memory.NewTestSessionStore()
 
 	s1 := store.GetOrCreate("abc")
 	if s1.ID != "abc" {
@@ -23,11 +23,11 @@ func TestSessionStore_GetOrCreate(t *testing.T) {
 }
 
 func TestSessionStore_AddAndGet(t *testing.T) {
-	store := agent.NewTestSessionStore()
+	store := memory.NewTestSessionStore()
 	store.GetOrCreate("sess1")
 
-	store.Add("sess1", agent.Message{Role: "user", Content: "hello", At: time.Now()})
-	store.Add("sess1", agent.Message{Role: "assistant", Content: "hi", At: time.Now()})
+	store.Add("sess1", memory.Message{Role: "user", Content: "hello", At: time.Now()})
+	store.Add("sess1", memory.Message{Role: "assistant", Content: "hi", At: time.Now()})
 
 	sess := store.Get("sess1")
 	if sess == nil {
@@ -42,14 +42,14 @@ func TestSessionStore_AddAndGet(t *testing.T) {
 }
 
 func TestSessionStore_GetMissing(t *testing.T) {
-	store := agent.NewTestSessionStore()
+	store := memory.NewTestSessionStore()
 	if store.Get("nonexistent") != nil {
 		t.Error("expected nil for missing session")
 	}
 }
 
 func TestSessionStore_Delete(t *testing.T) {
-	store := agent.NewTestSessionStore()
+	store := memory.NewTestSessionStore()
 	store.GetOrCreate("del1")
 	store.Delete("del1")
 	if store.Get("del1") != nil {
@@ -58,12 +58,12 @@ func TestSessionStore_Delete(t *testing.T) {
 }
 
 func TestSessionStore_MaxHistory(t *testing.T) {
-	store := agent.NewTestSessionStore()
+	store := memory.NewTestSessionStore()
 	store.GetOrCreate("big")
 
 	// Add more messages than maxHistory (20)
 	for i := 0; i < 30; i++ {
-		store.Add("big", agent.Message{Role: "user", Content: "msg", At: time.Now()})
+		store.Add("big", memory.Message{Role: "user", Content: "msg", At: time.Now()})
 	}
 
 	sess := store.Get("big")
@@ -73,7 +73,7 @@ func TestSessionStore_MaxHistory(t *testing.T) {
 }
 
 func TestSessionStore_Count(t *testing.T) {
-	store := agent.NewTestSessionStore()
+	store := memory.NewTestSessionStore()
 	store.GetOrCreate("a")
 	store.GetOrCreate("b")
 	store.GetOrCreate("c")

@@ -1,4 +1,4 @@
-package agent
+package memory
 
 import (
 	"sync"
@@ -34,14 +34,14 @@ type SessionStore struct {
 	done     chan struct{}
 }
 
-func newSessionStore() *SessionStore {
-	return newSessionStoreInternal(true)
+func NewSessionStore() *SessionStore {
+	return NewSessionStoreInternal(true)
 }
 
 // NewTestSessionStore creates a session store without the background cleanup
 // goroutine — safe for use in tests.
 func NewTestSessionStore() *SessionStore {
-	return newSessionStoreInternal(false)
+	return NewSessionStoreInternal(false)
 }
 
 // Stop terminates the background cleanup goroutine.
@@ -53,7 +53,7 @@ func (s *SessionStore) Stop() {
 	}
 }
 
-func newSessionStoreInternal(startCleanup bool) *SessionStore {
+func NewSessionStoreInternal(startCleanup bool) *SessionStore {
 	s := &SessionStore{
 		sessions: make(map[string]*Session),
 		done:     make(chan struct{}),

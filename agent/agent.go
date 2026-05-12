@@ -27,6 +27,7 @@ import (
 
 	"github.com/yabanci/agentshield/cache"
 	"github.com/yabanci/agentshield/config"
+	"github.com/yabanci/agentshield/memory"
 	"github.com/yabanci/agentshield/provider"
 	"github.com/yabanci/agentshield/quality"
 	"github.com/yabanci/agentshield/telemetry"
@@ -99,12 +100,12 @@ type Agent struct {
 	shedder        *loadshed.Shedder
 	cache          *cache.SemanticCache
 	tools          *ToolRegistry
-	sessions       *SessionStore
-	traces         *TraceStore
+	sessions       *memory.SessionStore
+	traces         *memory.TraceStore
 	webhook        *telemetry.WebhookDispatcher
 	costs          *telemetry.CostTracker
 	latency        *telemetry.LatencyTracker
-	scoreHistory   *ScoreHistory
+	scoreHistory   *memory.ScoreHistory
 	chaosMu        atomic.Bool
 	primaryKilled  atomic.Bool
 	fallbackKilled atomic.Bool
@@ -185,12 +186,12 @@ func newAgent(ollamaURL string) *Agent {
 
 	a.costs = telemetry.NewCostTracker()
 	a.latency = telemetry.NewLatencyTracker()
-	a.scoreHistory = newScoreHistory(60)
+	a.scoreHistory = memory.NewScoreHistory(60)
 	a.qualityEval = quality.NewEvaluator(a.embedder.Embed)
 	a.cache = cache.New(10*time.Minute, a.embedder.Embed)
 	a.tools = newToolRegistry(a)
-	a.sessions = newSessionStore()
-	a.traces = newTraceStore()
+	a.sessions = memory.NewSessionStore()
+	a.traces = memory.NewTraceStore()
 	return a
 }
 
@@ -216,8 +217,8 @@ func NewWithOllamaURL(url string) *Agent {
 	a := newAgent(url)
 	a.cache = cache.New(10*time.Minute, nil)
 	// Replace stores with test variants that don't start background goroutines.
-	a.traces = newTestTraceStore()
-	a.sessions = NewTestSessionStore()
+	a.traces = memory.NewTestTraceStore()
+	a.sessions = memory.NewTestSessionStore()
 	return a
 }
 
@@ -252,10 +253,10 @@ func (a *Agent) StartChaos(ctx context.Context) (<-chan ChaosEvent, error) {
 }
 
 // GetSession returns session history by ID.
-func (a *Agent) GetSession(id string) *Session { return a.sessions.Get(id) }
+func (a *Agent) GetSession(id string) *memory.Session { return a.sessions.Get(id) }
 
 // ListSessions returns all active sessions.
-func (a *Agent) ListSessions() []Session { return a.sessions.List() }
+func (a *Agent) ListSessions() []memory.Session { return a.sessions.List() }
 
 // DeleteSession removes a session.
 func (a *Agent) DeleteSession(id string) { a.sessions.Delete(id) }
@@ -299,7 +300,7 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 	if errors.Is(err, loadshed.ErrShed) {
 		telemetry.LoadshedTotal.Inc()
 		resp = Response{Text: "Server is overloaded. Please try again in a moment.", Tier: TierDegraded}
-		tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial, LatencyMS: 0})
+		tr.AddStep(memory.TraceStep{Tier: TierDegraded, Outcome: memory.OutcomeGracefulDenial, LatencyMS: 0})
 		a.costs.Record(TierDegraded, prompt, "") // keep TierCounts in sync with TotalRequests
 	} else if errors.Is(err, bulkhead.ErrFull) {
 		telemetry.BulkheadFullTotal.WithLabelValues(func() string {
@@ -309,20 +310,20 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 			return "interactive"
 		}()).Inc()
 		resp = Response{Text: "Too many concurrent requests. Please try again shortly.", Tier: TierDegraded}
-		tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial, LatencyMS: 0})
+		tr.AddStep(memory.TraceStep{Tier: TierDegraded, Outcome: memory.OutcomeGracefulDenial, LatencyMS: 0})
 		a.costs.Record(TierDegraded, prompt, "") // keep TierCounts in sync with TotalRequests
 	} else if err != nil {
 		return resp, err
 	}
 
-	tr.finalize(resp.Tier)
+	tr.Finalize(resp.Tier)
 	resp.TraceID = tr.ID
 	a.updateCBMetrics()
 	return resp, nil
 }
 
 // degrade runs the 4-tier degradation chain, recording each attempt in tr.
-func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response, error) {
+func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (Response, error) {
 	start := time.Now()
 
 	// Tier 1: primary model (hedged + transport CB + semantic CB + retry)
@@ -352,7 +353,7 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 		dur := time.Since(start)
 		telemetry.RequestsTotal.WithLabelValues("cache").Inc()
 		a.latency.Record(TierCache, dur)
-		tr.addStep(TraceStep{Tier: TierCache, Outcome: OutcomeCacheHit,
+		tr.AddStep(memory.TraceStep{Tier: TierCache, Outcome: memory.OutcomeCacheHit,
 			LatencyMS: dur.Milliseconds()})
 		a.costs.Record(TierCache, prompt, cached)
 		return Response{Text: cached, Tier: TierCache, Cached: true}, nil
@@ -360,7 +361,7 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 
 	// Tier 4: graceful denial
 	telemetry.RequestsTotal.WithLabelValues("degraded").Inc()
-	tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial,
+	tr.AddStep(memory.TraceStep{Tier: TierDegraded, Outcome: memory.OutcomeGracefulDenial,
 		LatencyMS: time.Since(start).Milliseconds()})
 	a.costs.Record(TierDegraded, prompt, "")
 	return Response{
@@ -374,24 +375,24 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 // Key design: quality evaluation is OUTSIDE the transport CB so that
 // semantic failures never pollute the transport circuit breaker's state.
 // The two breakers are fully independent.
-func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *Trace) (string, bool) {
+func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *memory.Trace) (string, bool) {
 	stepStart := time.Now()
-	step := TraceStep{
+	step := memory.TraceStep{
 		Tier:        TierPrimary,
 		TransportCB: a.primaryCB.State().String(),
 		SemanticCB:  string(a.primarySemCB.State()),
 	}
 	defer func() {
 		step.LatencyMS = time.Since(stepStart).Milliseconds()
-		tr.addStep(step)
+		tr.AddStep(step)
 	}()
 
 	if a.primaryKilled.Load() {
-		step.Outcome = OutcomeKilled
+		step.Outcome = memory.OutcomeKilled
 		return "", false
 	}
 	if a.primarySemCB.ShouldBlock() {
-		step.Outcome = OutcomeSemanticCBOpen
+		step.Outcome = memory.OutcomeSemanticCBOpen
 		return "", false
 	}
 
@@ -420,7 +421,7 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *Trace) (strin
 	})
 
 	if transportErr != nil {
-		step.Outcome = OutcomeTransportError
+		step.Outcome = memory.OutcomeTransportError
 		step.TransportCB = a.primaryCB.State().String()
 		return "", false
 	}
@@ -440,32 +441,32 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *Trace) (strin
 	}
 
 	if qr.Score < quality.QualityAcceptable && len(qr.Signals) > 0 {
-		step.Outcome = OutcomeSemanticFailure
+		step.Outcome = memory.OutcomeSemanticFailure
 		return "", false
 	}
-	step.Outcome = OutcomeSuccess
+	step.Outcome = memory.OutcomeSuccess
 	return result, true
 }
 
 // tryFallback uses transport CB + semantic CB (no hedge — fallback must be fast).
-func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *Trace) (string, bool) {
+func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *memory.Trace) (string, bool) {
 	stepStart := time.Now()
-	step := TraceStep{
+	step := memory.TraceStep{
 		Tier:        TierFallback,
 		TransportCB: a.fallbackCB.State().String(),
 		SemanticCB:  string(a.fallbackSemCB.State()),
 	}
 	defer func() {
 		step.LatencyMS = time.Since(stepStart).Milliseconds()
-		tr.addStep(step)
+		tr.AddStep(step)
 	}()
 
 	if a.fallbackKilled.Load() {
-		step.Outcome = OutcomeKilled
+		step.Outcome = memory.OutcomeKilled
 		return "", false
 	}
 	if a.fallbackSemCB.ShouldBlock() {
-		step.Outcome = OutcomeSemanticCBOpen
+		step.Outcome = memory.OutcomeSemanticCBOpen
 		return "", false
 	}
 
@@ -485,10 +486,10 @@ func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *Trace) (stri
 		return nil
 	})
 	if err != nil {
-		step.Outcome = OutcomeTransportError
+		step.Outcome = memory.OutcomeTransportError
 		return "", false
 	}
-	step.Outcome = OutcomeSuccess
+	step.Outcome = memory.OutcomeSuccess
 	return result, true
 }
 
@@ -600,10 +601,10 @@ func (a *Agent) PrimarySemanticSnapshot() quality.SBSnapshot { return a.primaryS
 func (a *Agent) FallbackSemanticSnapshot() quality.SBSnapshot { return a.fallbackSemCB.Snapshot() }
 
 // GetTrace returns a trace by ID.
-func (a *Agent) GetTrace(id string) *Trace { return a.traces.Get(id) }
+func (a *Agent) GetTrace(id string) *memory.Trace { return a.traces.Get(id) }
 
 // ScoreHistorySnapshot returns the recent score points for sparkline rendering.
-func (a *Agent) ScoreHistorySnapshot() []ScorePoint { return a.scoreHistory.Snapshot() }
+func (a *Agent) ScoreHistorySnapshot() []memory.ScorePoint { return a.scoreHistory.Snapshot() }
 
 // SetWebhookURL configures the webhook endpoint.
 func (a *Agent) SetWebhookURL(url string) { a.webhook.SetURL(url) }
