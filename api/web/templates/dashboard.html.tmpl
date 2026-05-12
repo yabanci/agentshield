@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentShield</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>⚡ AgentShield</h1>
+    <div class="subtitle">Resilient LLM Agent — flowguard-powered</div>
+  </div>
+  <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+    <span id="degrade-badge" class="badge red" style="display:none">🧪 degrade ON</span>
+    <span id="chaos-badge" class="badge gray" style="display:none">🎭 chaos running</span>
+    <span id="ollama-badge" class="badge gray">checking...</span>
+  </div>
+</div>
+
+<div class="grid">
+<!-- LEFT ──────────────────────────────────────────────────────────────── -->
+<div class="col">
+
+  <!-- Ask panel -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div class="label" style="margin:0">Ask the Agent</div>
+      <div class="mode-toggle">
+        <button class="mode-btn active" id="mode-simple" onclick="setMode('simple')">Simple</button>
+        <button class="mode-btn" id="mode-agent" onclick="setMode('agent')">🤖 Agent + Tools</button>
+        <button class="mode-btn" id="mode-stream" onclick="setMode('stream')">📡 Stream</button>
+      </div>
+    </div>
+    <div id="tools-row" class="tools-row" style="display:none"></div>
+    <textarea id="prompt" placeholder="Ask anything... (Ctrl+Enter to send)"></textarea>
+    <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+      <button class="btn btn-blue" id="ask-btn" onclick="sendPrompt()">Send →</button>
+      <span id="loading" style="display:none;font-size:11px;color:#6b7280">thinking...</span>
+      <span id="session-label" style="font-size:11px;color:#4b5563;margin-left:auto"></span>
+    </div>
+    <div style="margin-top:10px">
+      <div id="resp-meta" class="row" style="display:none;margin-bottom:6px">
+        <span style="font-size:11px;color:#6b7280">via</span>
+        <span id="tier-badge" class="badge"></span>
+        <span id="cached-badge" class="badge yellow" style="display:none">cached</span>
+        <span id="turns-badge" class="badge gray" style="display:none"></span>
+        <span id="trace-badge" style="display:none;font-size:11px"></span>
+      </div>
+      <div class="resp" id="resp-box">Response will appear here...</div>
+    </div>
+  </div>
+
+  <!-- ReAct steps (visible in agent mode) -->
+  <div class="card" id="react-card" style="display:none">
+    <div class="label">Reasoning Chain</div>
+    <div id="steps-container"></div>
+  </div>
+
+  <!-- Tabs: Demo | Session | Charts -->
+  <div class="card">
+    <div class="tab-row">
+      <div class="tab active" onclick="switchTab('demo')">🎭 Demo</div>
+      <div class="tab" onclick="switchTab('session')">💬 Session</div>
+      <div class="tab" onclick="switchTab('charts')">📊 Charts</div>
+    </div>
+
+    <!-- Demo tab -->
+    <div class="tab-pane active" id="tab-demo">
+      <div class="label">Transport failures</div>
+      <div class="demo-grid">
+        <button class="btn btn-red btn-sm" onclick="kill('primary')">💀 Kill Primary</button>
+        <button class="btn btn-green btn-sm" onclick="restore('primary')">✅ Restore Primary</button>
+        <button class="btn btn-red btn-sm" onclick="kill('fallback')">💀 Kill Fallback</button>
+        <button class="btn btn-green btn-sm" onclick="restore('fallback')">✅ Restore Fallback</button>
+      </div>
+      <hr>
+      <div class="label">🧪 Semantic quality degradation</div>
+      <p style="font-size:11px;color:#6b7280;margin-bottom:8px">
+        Primary returns <b>HTTP 200</b> but with garbage quality — repetitive, hallucinated, or incoherent responses.
+        Watch the <b>semantic CB</b> open while transport CB stays closed.
+      </p>
+      <div class="demo-grid">
+        <button class="btn btn-sm" style="background:#7c3aed;color:#fff" onclick="enableDegrade()">🧪 Enable Degrade</button>
+        <button class="btn btn-green btn-sm" onclick="disableDegrade()">✅ Restore Quality</button>
+      </div>
+      <hr>
+      <div class="label">Automated chaos scenario</div>
+      <p style="font-size:11px;color:#6b7280;margin-bottom:10px">
+        Scripted 4-phase scenario: baseline → kill primary → kill fallback → restore. Exercises all tiers automatically.
+      </p>
+      <button class="btn btn-purple" id="chaos-btn" onclick="startChaos()">▶ Run Chaos Demo</button>
+      <div class="chaos-log" id="chaos-log" style="margin-top:10px;display:none"></div>
+      <hr>
+      <div class="label">Event log</div>
+      <div class="log" id="log"></div>
+    </div>
+
+    <!-- Session tab -->
+    <div class="tab-pane" id="tab-session">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="label" style="margin:0">Current session</div>
+        <button class="btn btn-sm" style="background:#1f2937;color:#9ca3af" onclick="newSession()">+ New</button>
+      </div>
+      <div id="session-history" style="max-height:300px;overflow-y:auto"></div>
+      <div id="no-session" style="font-size:12px;color:#4b5563;text-align:center;padding:20px">
+        Send a message to start a session
+      </div>
+    </div>
+
+    <!-- Charts tab -->
+    <div class="tab-pane" id="tab-charts">
+      <div class="charts">
+        <div class="chart-wrap">
+          <div class="chart-title">Tier distribution</div>
+          <canvas id="chart-donut" height="160"></canvas>
+        </div>
+        <div class="chart-wrap">
+          <div class="chart-title">Requests / 3s</div>
+          <canvas id="chart-line" height="160"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- RIGHT ─────────────────────────────────────────────────────────────── -->
+<div class="col">
+
+  <div class="card">
+    <div class="label">Degradation Chain</div>
+    <div class="chain">
+      <div class="tier" id="tier-primary">
+        <span class="tier-icon">🧠</span>
+        <div style="flex:1">
+          <div class="tier-name">Primary — llama3.2</div>
+          <div class="tier-desc">Adaptive CB · retry 2x · hedge 1.5s · semantic CB</div>
+        </div>
+        <div style="display:flex;gap:4px;flex-direction:column;align-items:flex-end">
+          <span id="cb-primary" class="badge green" title="Transport circuit breaker">transport: closed</span>
+          <span id="sem-primary" class="badge green" title="Semantic quality circuit breaker">quality: healthy</span>
+          <span id="quality-primary" class="badge gray" title="Rolling quality score">q: —</span>
+          <span id="calib-primary" class="badge gray" title="Adaptive calibration status">calibrating…</span>
+        </div>
+      </div>
+      <div style="padding:1px 0 1px 13px;color:#374151;font-size:10px">↓ transport or semantic circuit opens</div>
+      <div class="tier" id="tier-fallback">
+        <span class="tier-icon">⚡</span>
+        <div style="flex:1">
+          <div class="tier-name">Fallback — llama3.2:1b</div>
+          <div class="tier-desc">Classic CB · semantic CB</div>
+        </div>
+        <div style="display:flex;gap:4px;flex-direction:column;align-items:flex-end">
+          <span id="cb-fallback" class="badge green" title="Transport circuit breaker">transport: closed</span>
+          <span id="sem-fallback" class="badge green" title="Semantic quality circuit breaker">quality: healthy</span>
+          <span id="quality-fallback" class="badge gray" title="Rolling quality score">q: —</span>
+          <span id="calib-fallback" class="badge gray" title="Adaptive calibration status">calibrating…</span>
+        </div>
+      </div>
+      <div style="padding:1px 0 1px 13px;color:#374151;font-size:10px">↓ circuit opens</div>
+      <div class="tier" id="tier-cache">
+        <span class="tier-icon">💾</span>
+        <div style="flex:1"><div class="tier-name">Semantic Cache</div><div class="tier-desc">nomic-embed-text · cosine sim &gt;0.92 · 10min TTL</div></div>
+        <span id="cache-size-badge" class="badge gray">0 entries</span>
+      </div>
+      <div style="padding:1px 0 1px 13px;color:#374151;font-size:10px">↓ cache miss</div>
+      <div class="tier" id="tier-degraded">
+        <span class="tier-icon">🔕</span>
+        <div style="flex:1"><div class="tier-name">Graceful Denial</div><div class="tier-desc">Always available</div></div>
+        <span class="badge gray">last resort</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Resilience Score -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div class="label" style="margin:0">Resilience Score</div>
+      <span id="score-grade" class="badge green" style="font-size:14px;padding:4px 12px">A</span>
+    </div>
+    <div style="text-align:center;margin-bottom:14px">
+      <div id="score-total" style="font-size:52px;font-weight:800;color:#f9fafb;line-height:1">100</div>
+      <div style="font-size:11px;color:#6b7280;margin-top:4px">out of 100</div>
+      <canvas id="score-spark" height="40" style="margin-top:8px;width:100%"></canvas>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:10px">
+      <div class="stat"><div class="stat-v" id="score-transport" style="font-size:14px">20</div><div class="stat-l">Transport /20</div></div>
+      <div class="stat"><div class="stat-v" id="score-quality" style="font-size:14px">20</div><div class="stat-l">Quality /20</div></div>
+      <div class="stat"><div class="stat-v" id="score-cache" style="font-size:14px">20</div><div class="stat-l">Cache /20</div></div>
+      <div class="stat"><div class="stat-v" id="score-avail" style="font-size:14px">20</div><div class="stat-l">Availability /20</div></div>
+      <div class="stat"><div class="stat-v" id="score-latency" style="font-size:14px">20</div><div class="stat-l">Latency /20</div></div>
+      <div class="stat"><div class="stat-v" id="score-p95" style="font-size:13px;color:#93c5fd">—</div><div class="stat-l">Primary p95</div></div>
+    </div>
+    <div id="score-rec" style="font-size:11px;color:#fcd34d;display:none;padding:6px 8px;background:#78350f22;border-radius:5px;border:1px solid #78350f"></div>
+  </div>
+
+  <!-- Cost Savings -->
+  <div class="card">
+    <div class="label">💰 Cost Savings</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">
+      <div class="stat"><div class="stat-v" id="cost-spent" style="font-size:14px">$0.0000</div><div class="stat-l">Spent (est.)</div></div>
+      <div class="stat"><div class="stat-v" id="cost-saved" style="font-size:14px;color:#6ee7b7">$0.0000</div><div class="stat-l">Saved</div></div>
+    </div>
+    <div style="margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:#6b7280;margin-bottom:4px">
+        <span>Savings rate</span>
+        <span id="cost-pct">0%</span>
+      </div>
+      <div style="background:#1f2937;border-radius:4px;height:6px;overflow:hidden">
+        <div id="cost-bar" style="background:#059669;height:100%;width:0%;transition:width .5s"></div>
+      </div>
+    </div>
+    <div style="font-size:10px;color:#4b5563;line-height:1.8">
+      <div>Cache hits: <span id="cost-cache-hits" style="color:#a78bfa">0</span> requests → <span id="cost-saved-cache" style="color:#6ee7b7">$0.0000</span></div>
+      <div>Fallback routing: <span id="cost-fallback-reqs" style="color:#fcd34d">0</span> requests → <span id="cost-saved-fallback" style="color:#6ee7b7">$0.0000</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="label">Live Stats</div>
+    <div class="stat-grid">
+      <div class="stat"><div class="stat-v" id="st-total">0</div><div class="stat-l">Total Requests</div></div>
+      <div class="stat"><div class="stat-v" id="st-err">0%</div><div class="stat-l">Primary Error Rate</div></div>
+      <div class="stat"><div class="stat-v" id="st-cache">0</div><div class="stat-l">Cache Entries</div></div>
+      <div class="stat"><div class="stat-v" id="st-shed">50</div><div class="stat-l">Loadshed Limit</div></div>
+      <div class="stat"><div class="stat-v" id="st-sessions">0</div><div class="stat-l">Active Sessions</div></div>
+      <div class="stat"><div class="stat-v" id="st-inflight">0</div><div class="stat-l">In-Flight</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="label">Protection Layers</div>
+    <div style="font-family:monospace;font-size:11px;color:#6b7280;line-height:1.9">
+      <span style="color:#93c5fd">POST /chat</span><br>
+      &nbsp;→ <span style="color:#fcd34d">Loadshed</span> (AIMD, limit: <span id="arch-shed">50</span>)<br>
+      &nbsp;→ <span style="color:#fcd34d">Bulkhead</span> (interactive 20 / batch 5)<br>
+      &nbsp;→ <span style="color:#fcd34d">CircuitBreaker</span> (adaptive &gt;50% err)<br>
+      &nbsp;→ <span style="color:#fcd34d">Hedge</span> (duplicate at 1.5s)<br>
+      &nbsp;→ <span style="color:#fcd34d">Retry</span> (2x exp backoff)<br>
+      &nbsp;&nbsp;&nbsp;↓ fail → CB → fallback<br>
+      &nbsp;&nbsp;&nbsp;↓ fail → semantic cache<br>
+      &nbsp;&nbsp;&nbsp;↓ miss → graceful denial<br>
+      <br>
+      <span style="color:#93c5fd">POST /react</span><br>
+      &nbsp;→ ReAct loop (max 6 iters)<br>
+      &nbsp;→ Tools: calculate · get_time<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;search_docs · check_system<br>
+      &nbsp;→ Each tool: own CB<br>
+      &nbsp;→ Session history preserved<br>
+      <br>
+      <span style="color:#93c5fd">GET /metrics</span> → Prometheus<br>
+      <span style="color:#93c5fd">GET /chat/stream</span> → SSE tokens
+    </div>
+  </div>
+
+</div>
+</div>
+
+<script src="/static/dashboard.js"></script>
+</body>
+</html>
