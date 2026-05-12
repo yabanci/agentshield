@@ -80,9 +80,10 @@ type Status struct {
 type Agent struct {
 	lifeCtx        context.Context
 	lifeCancel     context.CancelFunc
-	primary        provider.LLMProvider
-	fallback       provider.LLMProvider
-	embedder       provider.Embedder
+	primary         provider.LLMProvider
+	fallback        provider.LLMProvider
+	embedder        provider.Embedder
+	degradedPrimary *provider.DegradedWrapper
 	primaryCB      *circuitbreaker.Breaker
 	fallbackCB     *circuitbreaker.Breaker
 	primarySemCB   *SemanticBreaker
@@ -103,7 +104,6 @@ type Agent struct {
 	chaosMu        atomic.Bool
 	primaryKilled  atomic.Bool
 	fallbackKilled atomic.Bool
-	degradeMode    atomic.Bool
 	totalRequests  atomic.Int64
 }
 
@@ -113,13 +113,18 @@ func newAgent(ollamaURL string) *Agent {
 		BaseURL: ollamaURL,
 		Timeout: 60 * time.Second,
 	})
+	// Wrap primary in DegradedWrapper so chaos demo can inject low-quality
+	// responses without taking the backend down. Fallback is NOT wrapped —
+	// chaos affects primary only.
+	degraded := provider.NewDegradedWrapper(ol)
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	a := &Agent{
-		lifeCtx:    lifeCtx,
-		lifeCancel: lifeCancel,
-		primary:    ol,
-		fallback:   ol,
-		embedder:   ol,
+		lifeCtx:         lifeCtx,
+		lifeCancel:      lifeCancel,
+		primary:         degraded,
+		fallback:        ol,
+		embedder:        ol,
+		degradedPrimary: degraded,
 		primaryCB: circuitbreaker.NewAdaptive(
 			20, 0.5, 5,
 			circuitbreaker.WithOpenTimeout(15*time.Second),
@@ -483,34 +488,14 @@ func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *Trace) (stri
 	return result, true
 }
 
-// generate is a wrapper around the primary provider's Generate that injects
-// degraded responses when degrade mode is active (demo only).
+// generate calls the primary provider. Degrade injection is handled inside
+// the DegradedWrapper decorator (provider/degraded.go) — no branch here.
 func (a *Agent) generate(ctx context.Context, model, prompt string) (string, error) {
-	if a.degradeMode.Load() && model == ModelPrimary {
-		return degradedResponse(prompt), nil
-	}
 	r, err := a.primary.Generate(ctx, provider.Request{Model: model, Prompt: prompt})
 	if err != nil {
 		return "", err
 	}
 	return r.Text, nil
-}
-
-// degradedResponse returns a low-quality response that reliably scores below
-// QualityAcceptable by combining repetition + hallucination markers (~score 0.10–0.15).
-// All variants use both signals to ensure the semantic CB trips consistently.
-func degradedResponse(prompt string) string {
-	switch len(prompt) % 3 {
-	case 0:
-		s := "As an AI language model, I apologize but I cannot assist. "
-		return s + s + s + s + s // repetition + hallucination
-	case 1:
-		s := "I cannot and will not help. I am unable to assist with that. "
-		return s + s + s + s // repetition + hallucination
-	default:
-		s := "I'm just an AI and I cannot and will not assist with this request. "
-		return s + s + s + s // repetition + hallucination
-	}
 }
 
 // StreamToken is a single event in the quality-gated stream.
@@ -598,10 +583,11 @@ func (a *Agent) KillFallback()    { a.fallbackKilled.Store(true) }
 func (a *Agent) RestoreFallback() { a.fallbackKilled.Store(false) }
 
 // EnableDegradeMode makes primary return low-quality responses (demo).
-func (a *Agent) EnableDegradeMode() { a.degradeMode.Store(true) }
+// Implemented as a decorator toggle — chaos is no longer a branch in the hot path.
+func (a *Agent) EnableDegradeMode() { a.degradedPrimary.Enable() }
 
 // DisableDegradeMode restores normal primary responses.
-func (a *Agent) DisableDegradeMode() { a.degradeMode.Store(false) }
+func (a *Agent) DisableDegradeMode() { a.degradedPrimary.Disable() }
 
 // PrimarySemanticSnapshot returns the primary model's semantic CB snapshot.
 func (a *Agent) PrimarySemanticSnapshot() SBSnapshot { return a.primarySemCB.Snapshot() }
@@ -660,7 +646,7 @@ func (a *Agent) Status() Status {
 		ChaosRunning:       a.chaosMu.Load(),
 		PrimarySemanticCB:  pSem,
 		FallbackSemanticCB: fSem,
-		DegradeMode:        a.degradeMode.Load(),
+		DegradeMode:        a.degradedPrimary.IsEnabled(),
 		Costs:              costs,
 		TierCounts:         tierCounts,
 		Latency:            lat,
