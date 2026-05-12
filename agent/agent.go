@@ -28,6 +28,7 @@ import (
 	"github.com/yabanci/agentshield/cache"
 	"github.com/yabanci/agentshield/config"
 	"github.com/yabanci/agentshield/memory"
+	"github.com/yabanci/agentshield/orchestrator"
 	"github.com/yabanci/agentshield/provider"
 	"github.com/yabanci/agentshield/quality"
 	"github.com/yabanci/agentshield/telemetry"
@@ -85,14 +86,10 @@ type Status struct {
 type Agent struct {
 	lifeCtx        context.Context
 	lifeCancel     context.CancelFunc
-	primary         provider.LLMProvider
-	fallback        provider.LLMProvider
-	embedder        provider.Embedder
-	degradedPrimary *provider.DegradedWrapper
-	primaryCB      *circuitbreaker.Breaker
-	fallbackCB     *circuitbreaker.Breaker
-	primarySemCB   *quality.SemanticBreaker
-	fallbackSemCB  *quality.SemanticBreaker
+	primary   provider.LLMProvider
+	fallback  provider.LLMProvider
+	embedder  provider.Embedder
+	breakers  *orchestrator.BreakerSet
 	qualityEval    *quality.QualityEvaluator
 	hedger         *hedge.Hedge
 	interactiveBH  *bulkhead.Bulkhead
@@ -102,9 +99,7 @@ type Agent struct {
 	tools          *ToolRegistry
 	memory         *memory.Store
 	telemetry      *telemetry.Store
-	chaosMu        atomic.Bool
-	primaryKilled  atomic.Bool
-	fallbackKilled atomic.Bool
+	chaos          *orchestrator.Chaos
 	totalRequests  atomic.Int64
 }
 
@@ -120,21 +115,12 @@ func newAgent(ollamaURL string) *Agent {
 	degraded := provider.NewDegradedWrapper(ol)
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	a := &Agent{
-		lifeCtx:         lifeCtx,
-		lifeCancel:      lifeCancel,
-		primary:         degraded,
-		fallback:        ol,
-		embedder:        ol,
-		degradedPrimary: degraded,
-		primaryCB: circuitbreaker.NewAdaptive(
-			20, 0.5, 5,
-			circuitbreaker.WithOpenTimeout(15*time.Second),
-			circuitbreaker.WithSuccessThreshold(2),
-		),
-		fallbackCB: circuitbreaker.New(
-			circuitbreaker.WithFailureThreshold(3),
-			circuitbreaker.WithOpenTimeout(30*time.Second),
-		),
+		lifeCtx:    lifeCtx,
+		lifeCancel: lifeCancel,
+		primary:    degraded,
+		fallback:   ol,
+		embedder:   ol,
+		chaos: orchestrator.NewChaos(degraded),
 		// Hedge: if primary model hasn't responded in 1.5s, fire a duplicate.
 		// Returns whichever completes first.
 		hedger: hedge.New(1500*time.Millisecond, hedge.WithMaxHedges(1)),
@@ -149,7 +135,16 @@ func newAgent(ollamaURL string) *Agent {
 	a.telemetry = telemetry.NewStore()
 	a.memory = memory.NewStore(60)
 
-	a.primarySemCB = quality.NewSemanticBreaker(quality.DefaultSBConfig).
+	pt := circuitbreaker.NewAdaptive(
+		20, 0.5, 5,
+		circuitbreaker.WithOpenTimeout(15*time.Second),
+		circuitbreaker.WithSuccessThreshold(2),
+	)
+	ft := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(3),
+		circuitbreaker.WithOpenTimeout(30*time.Second),
+	)
+	ps := quality.NewSemanticBreaker(quality.DefaultSBConfig).
 		WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
 			a.telemetry.Webhook.Fire(telemetry.WebhookEvent{
 				Event:      fmt.Sprintf("semantic_cb_%s", next),
@@ -161,8 +156,7 @@ func newAgent(ollamaURL string) *Agent {
 				Timestamp:  time.Now(),
 			})
 		})
-
-	a.fallbackSemCB = quality.NewSemanticBreaker(quality.SemanticBreakerConfig{
+	fs := quality.NewSemanticBreaker(quality.SemanticBreakerConfig{
 		WindowSize:        6,
 		MinSamples:        2,
 		DegradedThreshold: 0.55,
@@ -180,6 +174,7 @@ func newAgent(ollamaURL string) *Agent {
 			Timestamp:  time.Now(),
 		})
 	})
+	a.breakers = orchestrator.NewBreakerSet(pt, ft, ps, fs)
 
 	a.qualityEval = quality.NewEvaluator(a.embedder.Embed)
 	a.cache = cache.New(10*time.Minute, a.embedder.Embed)
@@ -232,13 +227,13 @@ func (a *Agent) LifecycleContext() context.Context {
 // StartChaos runs the automated chaos scenario asynchronously.
 // Returns a channel of events and an error if chaos is already running.
 func (a *Agent) StartChaos(ctx context.Context) (<-chan ChaosEvent, error) {
-	if !a.chaosMu.CompareAndSwap(false, true) {
+	if !a.chaos.TryStart() {
 		return nil, fmt.Errorf("chaos scenario already running")
 	}
 	ch := make(chan ChaosEvent, 64)
 	go func() {
 		defer close(ch)
-		defer a.chaosMu.Store(false)
+		defer a.chaos.Done()
 		a.RunChaos(ctx, ch)
 	}()
 	return ch, nil
@@ -371,19 +366,19 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *memory.Trace)
 	stepStart := time.Now()
 	step := memory.TraceStep{
 		Tier:        TierPrimary,
-		TransportCB: a.primaryCB.State().String(),
-		SemanticCB:  string(a.primarySemCB.State()),
+		TransportCB: a.breakers.PrimaryTransport.State().String(),
+		SemanticCB:  string(a.breakers.PrimarySemantic.State()),
 	}
 	defer func() {
 		step.LatencyMS = time.Since(stepStart).Milliseconds()
 		tr.AddStep(step)
 	}()
 
-	if a.primaryKilled.Load() {
+	if a.chaos.IsPrimaryKilled() {
 		step.Outcome = memory.OutcomeKilled
 		return "", false
 	}
-	if a.primarySemCB.ShouldBlock() {
+	if a.breakers.PrimarySemantic.ShouldBlock() {
 		step.Outcome = memory.OutcomeSemanticCBOpen
 		return "", false
 	}
@@ -391,7 +386,7 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *memory.Trace)
 	var result string
 	hedgeFireCount := 0
 
-	transportErr := a.primaryCB.Do(ctx, func(ctx context.Context) error {
+	transportErr := a.breakers.PrimaryTransport.Do(ctx, func(ctx context.Context) error {
 		return a.hedger.Do(ctx, func(ctx context.Context) error {
 			hedgeFireCount++
 			if hedgeFireCount > 1 {
@@ -414,16 +409,16 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *memory.Trace)
 
 	if transportErr != nil {
 		step.Outcome = memory.OutcomeTransportError
-		step.TransportCB = a.primaryCB.State().String()
+		step.TransportCB = a.breakers.PrimaryTransport.State().String()
 		return "", false
 	}
 
 	qr := a.qualityEval.Evaluate(ctx, prompt, result)
-	a.primarySemCB.Record(qr.Score, qr)
+	a.breakers.PrimarySemantic.Record(qr.Score, qr)
 	telemetry.QualityGauge.WithLabelValues("primary").Set(qr.Score)
 
 	step.QualityScore = &qr.Score
-	step.SemanticCB = string(a.primarySemCB.State())
+	step.SemanticCB = string(a.breakers.PrimarySemantic.State())
 	if len(qr.Signals) > 0 {
 		names := make([]string, len(qr.Signals))
 		for i, s := range qr.Signals {
@@ -445,35 +440,35 @@ func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *memory.Trace
 	stepStart := time.Now()
 	step := memory.TraceStep{
 		Tier:        TierFallback,
-		TransportCB: a.fallbackCB.State().String(),
-		SemanticCB:  string(a.fallbackSemCB.State()),
+		TransportCB: a.breakers.FallbackTransport.State().String(),
+		SemanticCB:  string(a.breakers.FallbackSemantic.State()),
 	}
 	defer func() {
 		step.LatencyMS = time.Since(stepStart).Milliseconds()
 		tr.AddStep(step)
 	}()
 
-	if a.fallbackKilled.Load() {
+	if a.chaos.IsFallbackKilled() {
 		step.Outcome = memory.OutcomeKilled
 		return "", false
 	}
-	if a.fallbackSemCB.ShouldBlock() {
+	if a.breakers.FallbackSemantic.ShouldBlock() {
 		step.Outcome = memory.OutcomeSemanticCBOpen
 		return "", false
 	}
 
 	var result string
-	err := a.fallbackCB.Do(ctx, func(ctx context.Context) error {
+	err := a.breakers.FallbackTransport.Do(ctx, func(ctx context.Context) error {
 		r, err := a.fallback.Generate(ctx, provider.Request{Model: ModelFallback, Prompt: prompt})
 		text := r.Text
 		if err != nil {
 			return err
 		}
 		qr := a.qualityEval.Evaluate(ctx, prompt, text)
-		a.fallbackSemCB.Record(qr.Score, qr)
+		a.breakers.FallbackSemantic.Record(qr.Score, qr)
 		telemetry.QualityGauge.WithLabelValues("fallback").Set(qr.Score)
 		step.QualityScore = &qr.Score
-		step.SemanticCB = string(a.fallbackSemCB.State())
+		step.SemanticCB = string(a.breakers.FallbackSemantic.State())
 		result = text
 		return nil
 	})
@@ -509,9 +504,9 @@ type StreamToken struct {
 // the stream aborts and automatically continues from the fallback model.
 // The caller receives a StreamToken{Switched: true} event at the switch point.
 func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out chan<- StreamToken) (Tier, error) {
-	canUsePrimary := !a.primaryKilled.Load() &&
-		!a.primarySemCB.ShouldBlock() &&
-		a.primaryCB.State().String() == "closed"
+	canUsePrimary := !a.chaos.IsPrimaryKilled() &&
+		!a.breakers.PrimarySemantic.ShouldBlock() &&
+		a.breakers.PrimaryTransport.State().String() == "closed"
 
 	if canUsePrimary {
 		// Use a cancellable child context so we can abort the primary stream
@@ -572,25 +567,25 @@ func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out ch
 }
 
 // KillPrimary / RestorePrimary simulate primary model failures.
-func (a *Agent) KillPrimary()   { a.primaryKilled.Store(true) }
-func (a *Agent) RestorePrimary() { a.primaryKilled.Store(false) }
+func (a *Agent) KillPrimary() { a.chaos.KillPrimary() }
+func (a *Agent) RestorePrimary() { a.chaos.RestorePrimary() }
 
 // KillFallback / RestoreFallback simulate fallback model failures.
-func (a *Agent) KillFallback()    { a.fallbackKilled.Store(true) }
-func (a *Agent) RestoreFallback() { a.fallbackKilled.Store(false) }
+func (a *Agent) KillFallback()    { a.chaos.KillFallback() }
+func (a *Agent) RestoreFallback() { a.chaos.RestoreFallback() }
 
 // EnableDegradeMode makes primary return low-quality responses (demo).
 // Implemented as a decorator toggle — chaos is no longer a branch in the hot path.
-func (a *Agent) EnableDegradeMode() { a.degradedPrimary.Enable() }
+func (a *Agent) EnableDegradeMode() { a.chaos.EnableDegrade() }
 
 // DisableDegradeMode restores normal primary responses.
-func (a *Agent) DisableDegradeMode() { a.degradedPrimary.Disable() }
+func (a *Agent) DisableDegradeMode() { a.chaos.DisableDegrade() }
 
 // PrimarySemanticSnapshot returns the primary model's semantic CB snapshot.
-func (a *Agent) PrimarySemanticSnapshot() quality.SBSnapshot { return a.primarySemCB.Snapshot() }
+func (a *Agent) PrimarySemanticSnapshot() quality.SBSnapshot { return a.breakers.PrimarySemantic.Snapshot() }
 
 // FallbackSemanticSnapshot returns the fallback model's semantic CB snapshot.
-func (a *Agent) FallbackSemanticSnapshot() quality.SBSnapshot { return a.fallbackSemCB.Snapshot() }
+func (a *Agent) FallbackSemanticSnapshot() quality.SBSnapshot { return a.breakers.FallbackSemantic.Snapshot() }
 
 // GetTrace returns a trace by ID.
 func (a *Agent) GetTrace(id string) *memory.Trace { return a.memory.Traces.Get(id) }
@@ -609,16 +604,16 @@ func (a *Agent) WebhookURL() string { return a.telemetry.Webhook.URL() }
 
 // Status returns a live snapshot of all resilience layers.
 func (a *Agent) Status() Status {
-	primaryState := a.primaryCB.State().String()
-	if a.primaryKilled.Load() {
+	primaryState := a.breakers.PrimaryTransport.State().String()
+	if a.chaos.IsPrimaryKilled() {
 		primaryState = "killed"
 	}
-	fallbackState := a.fallbackCB.State().String()
-	if a.fallbackKilled.Load() {
+	fallbackState := a.breakers.FallbackTransport.State().String()
+	if a.chaos.IsFallbackKilled() {
 		fallbackState = "killed"
 	}
-	pSem := a.primarySemCB.Snapshot()
-	fSem := a.fallbackSemCB.Snapshot()
+	pSem := a.breakers.PrimarySemantic.Snapshot()
+	fSem := a.breakers.FallbackSemantic.Snapshot()
 	telemetry.SemanticCBStateGauge.WithLabelValues("primary").Set(telemetry.SBStateValue(pSem.State))
 	telemetry.SemanticCBStateGauge.WithLabelValues("fallback").Set(telemetry.SBStateValue(fSem.State))
 
@@ -630,20 +625,20 @@ func (a *Agent) Status() Status {
 	s := Status{
 		PrimaryBreaker:     primaryState,
 		FallbackBreaker:    fallbackState,
-		PrimaryKilled:      a.primaryKilled.Load(),
-		FallbackKilled:     a.fallbackKilled.Load(),
+		PrimaryKilled:      a.chaos.IsPrimaryKilled(),
+		FallbackKilled:     a.chaos.IsFallbackKilled(),
 		CacheSize:          a.cache.Size(),
 		TotalRequests:      a.totalRequests.Load(),
-		ErrorRate:          a.primaryCB.ErrorRate(),
+		ErrorRate:          a.breakers.PrimaryTransport.ErrorRate(),
 		LoadshedLimit:      a.shedder.CurrentLimit(),
 		LoadshedInflight:   a.shedder.Inflight(),
 		InteractiveBusy:    a.interactiveBH.ActiveCount(),
 		BatchBusy:          a.batchBH.ActiveCount(),
 		ActiveSessions:     a.memory.Sessions.Count(),
-		ChaosRunning:       a.chaosMu.Load(),
+		ChaosRunning:       a.chaos.IsRunning(),
 		PrimarySemanticCB:  pSem,
 		FallbackSemanticCB: fSem,
-		DegradeMode:        a.degradedPrimary.IsEnabled(),
+		DegradeMode:        a.chaos.IsDegradeEnabled(),
 		Costs:              costs,
 		TierCounts:         tierCounts,
 		Latency:            lat,
@@ -674,7 +669,7 @@ func (a *Agent) Ping(ctx context.Context) error {
 }
 
 func (a *Agent) updateCBMetrics() {
-	telemetry.CBStateGauge.WithLabelValues("primary").Set(telemetry.CBStateValue(a.primaryCB.State().String()))
-	telemetry.CBStateGauge.WithLabelValues("fallback").Set(telemetry.CBStateValue(a.fallbackCB.State().String()))
+	telemetry.CBStateGauge.WithLabelValues("primary").Set(telemetry.CBStateValue(a.breakers.PrimaryTransport.State().String()))
+	telemetry.CBStateGauge.WithLabelValues("fallback").Set(telemetry.CBStateValue(a.breakers.FallbackTransport.State().String()))
 	// cache size gauge is owned and updated by cache package internally.
 }
