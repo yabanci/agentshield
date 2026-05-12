@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/quality"
 )
 
 // TestSemanticCB_RoutesToFallbackOnQualityDegradation is the core integration test.
@@ -81,7 +82,7 @@ func TestSemanticCB_TransportAndSemanticCBsAreIndependent(t *testing.T) {
 	}
 	// Semantic CB: should have detected the quality drop
 	snap := a.PrimarySemanticSnapshot()
-	if snap.State == agent.SBHealthy && snap.AvgQuality > 0.60 {
+	if snap.State == quality.SBHealthy && snap.AvgQuality > 0.60 {
 		t.Logf("semantic state=%s avg=%.2f — CB may need more samples", snap.State, snap.AvgQuality)
 	}
 }
@@ -89,7 +90,7 @@ func TestSemanticCB_TransportAndSemanticCBsAreIndependent(t *testing.T) {
 // TestDegradeMode_ProducesLowQualityScores verifies degradedResponse() outputs
 // reliably score below QualityAcceptable (caught by semantic CB).
 func TestDegradeMode_ProducesLowQualityScores(t *testing.T) {
-	eval := agent.NewTestQualityEvaluator(nil)
+	eval := quality.NewTestQualityEvaluator(nil)
 	ctx := context.Background()
 	prompt := "explain how circuit breakers work in distributed systems"
 
@@ -111,16 +112,16 @@ func TestDegradeMode_ProducesLowQualityScores(t *testing.T) {
 
 	for i, resp := range degraded {
 		result := eval.Evaluate(ctx, prompt, resp)
-		if result.Score >= agent.QualityAcceptable {
+		if result.Score >= quality.QualityAcceptable {
 			t.Errorf("degraded[%d] scored %.2f >= QualityAcceptable %.2f",
-				i, result.Score, agent.QualityAcceptable)
+				i, result.Score, quality.QualityAcceptable)
 		}
 	}
 }
 
 // TestQuality_AbsoluteMinLength verifies very short responses are always penalised.
 func TestQuality_AbsoluteMinLength(t *testing.T) {
-	eval := agent.NewTestQualityEvaluator(nil)
+	eval := quality.NewTestQualityEvaluator(nil)
 	ctx := context.Background()
 
 	short := []string{"Yes.", "No.", "OK", "Sure"}
@@ -141,7 +142,7 @@ func TestQuality_AbsoluteMinLength(t *testing.T) {
 // TestSemanticBreaker_RecoveryAfterDegradeDisabled verifies the circuit
 // recovers after degrade mode is turned off.
 func TestSemanticBreaker_RecoveryAfterDegradeDisabled(t *testing.T) {
-	cfg := agent.SemanticBreakerConfig{
+	cfg := quality.SemanticBreakerConfig{
 		WindowSize:        4,
 		MinSamples:        2,
 		DegradedThreshold: 0.65,
@@ -149,21 +150,21 @@ func TestSemanticBreaker_RecoveryAfterDegradeDisabled(t *testing.T) {
 		OpenTimeout:       0 * time.Second, // expire immediately for test
 		RecoverySamples:   2,
 	}
-	sb := agent.NewSemanticBreaker(cfg)
+	sb := quality.NewSemanticBreaker(cfg)
 
 	// Trip the breaker
 	for i := 0; i < 3; i++ {
-		sb.Record(0.10, agent.QualityResult{Score: 0.10})
+		sb.Record(0.10, quality.QualityResult{Score: 0.10})
 	}
-	if sb.State() != agent.SBFailing {
+	if sb.State() != quality.SBFailing {
 		t.Fatalf("expected failing state after bad scores, got %s", sb.State())
 	}
 
 	// Recovery — OpenTimeout=0 means probes allowed immediately
 	for i := 0; i < cfg.RecoverySamples; i++ {
-		sb.Record(0.90, agent.QualityResult{Score: 0.90})
+		sb.Record(0.90, quality.QualityResult{Score: 0.90})
 	}
-	if sb.State() != agent.SBHealthy {
+	if sb.State() != quality.SBHealthy {
 		t.Errorf("expected recovery to healthy, got %s", sb.State())
 	}
 }

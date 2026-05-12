@@ -1,14 +1,14 @@
-package agent_test
+package quality_test
 
 import (
 	"testing"
 	"time"
 
-	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/quality"
 )
 
-func testCfg() agent.SemanticBreakerConfig {
-	return agent.SemanticBreakerConfig{
+func testCfg() quality.SemanticBreakerConfig {
+	return quality.SemanticBreakerConfig{
 		WindowSize:        6,
 		MinSamples:        3,
 		DegradedThreshold: 0.65,
@@ -18,13 +18,13 @@ func testCfg() agent.SemanticBreakerConfig {
 	}
 }
 
-func record(sb *agent.SemanticBreaker, score float64) {
-	sb.Record(score, agent.QualityResult{Score: score})
+func record(sb *quality.SemanticBreaker, score float64) {
+	sb.Record(score, quality.QualityResult{Score: score})
 }
 
 func TestSB_StartsHealthy(t *testing.T) {
-	sb := agent.NewSemanticBreaker(testCfg())
-	if sb.State() != agent.SBHealthy {
+	sb := quality.NewSemanticBreaker(testCfg())
+	if sb.State() != quality.SBHealthy {
 		t.Errorf("expected healthy, got %s", sb.State())
 	}
 	if sb.ShouldBlock() {
@@ -33,31 +33,31 @@ func TestSB_StartsHealthy(t *testing.T) {
 }
 
 func TestSB_StaysHealthyOnGoodScores(t *testing.T) {
-	sb := agent.NewSemanticBreaker(testCfg())
+	sb := quality.NewSemanticBreaker(testCfg())
 	for i := 0; i < 6; i++ {
 		record(sb, 0.90)
 	}
-	if sb.State() != agent.SBHealthy {
+	if sb.State() != quality.SBHealthy {
 		t.Errorf("expected healthy, got %s", sb.State())
 	}
 }
 
 func TestSB_TransitionsToDegradedOnMediumScores(t *testing.T) {
-	sb := agent.NewSemanticBreaker(testCfg())
+	sb := quality.NewSemanticBreaker(testCfg())
 	for i := 0; i < 4; i++ {
 		record(sb, 0.50) // below degraded threshold (0.65) but above failing (0.45)
 	}
-	if sb.State() == agent.SBHealthy {
+	if sb.State() == quality.SBHealthy {
 		t.Error("expected degraded or failing, still healthy")
 	}
 }
 
 func TestSB_OpensOnBadScores(t *testing.T) {
-	sb := agent.NewSemanticBreaker(testCfg())
+	sb := quality.NewSemanticBreaker(testCfg())
 	for i := 0; i < 4; i++ {
 		record(sb, 0.20) // well below failing threshold
 	}
-	if sb.State() != agent.SBFailing {
+	if sb.State() != quality.SBFailing {
 		t.Errorf("expected failing, got %s", sb.State())
 	}
 	if !sb.ShouldBlock() {
@@ -66,7 +66,7 @@ func TestSB_OpensOnBadScores(t *testing.T) {
 }
 
 func TestSB_TripReason_SetWhenFailing(t *testing.T) {
-	sb := agent.NewSemanticBreaker(testCfg())
+	sb := quality.NewSemanticBreaker(testCfg())
 	for i := 0; i < 4; i++ {
 		record(sb, 0.10)
 	}
@@ -79,13 +79,13 @@ func TestSB_TripReason_SetWhenFailing(t *testing.T) {
 func TestSB_RecoveryAfterGoodScores(t *testing.T) {
 	cfg := testCfg()
 	cfg.OpenTimeout = 0 * time.Second // expire immediately so probe is allowed
-	sb := agent.NewSemanticBreaker(cfg)
+	sb := quality.NewSemanticBreaker(cfg)
 
 	// Trip the breaker
 	for i := 0; i < 4; i++ {
 		record(sb, 0.10)
 	}
-	if sb.State() != agent.SBFailing {
+	if sb.State() != quality.SBFailing {
 		t.Fatal("expected failing state")
 	}
 
@@ -93,13 +93,13 @@ func TestSB_RecoveryAfterGoodScores(t *testing.T) {
 	for i := 0; i < cfg.RecoverySamples; i++ {
 		record(sb, 0.90)
 	}
-	if sb.State() != agent.SBHealthy {
+	if sb.State() != quality.SBHealthy {
 		t.Errorf("expected recovery to healthy, got %s", sb.State())
 	}
 }
 
 func TestSB_RollingAvg_AccuracyWithWindow(t *testing.T) {
-	sb := agent.NewSemanticBreaker(testCfg())
+	sb := quality.NewSemanticBreaker(testCfg())
 	// Add 3 good, then 3 bad — avg should be ~0.5
 	for i := 0; i < 3; i++ {
 		record(sb, 1.0)
@@ -114,11 +114,11 @@ func TestSB_RollingAvg_AccuracyWithWindow(t *testing.T) {
 }
 
 func TestSB_MinSamplesPreventsPrematureTrip(t *testing.T) {
-	sb := agent.NewSemanticBreaker(testCfg()) // minSamples=3
+	sb := quality.NewSemanticBreaker(testCfg()) // minSamples=3
 	// Only 2 bad scores — should not trip yet
 	record(sb, 0.10)
 	record(sb, 0.10)
-	if sb.State() != agent.SBHealthy {
+	if sb.State() != quality.SBHealthy {
 		t.Errorf("should not trip with < minSamples, got %s", sb.State())
 	}
 }

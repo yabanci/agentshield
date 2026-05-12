@@ -27,6 +27,7 @@ import (
 
 	"github.com/yabanci/agentshield/config"
 	"github.com/yabanci/agentshield/provider"
+	"github.com/yabanci/agentshield/quality"
 )
 
 const (
@@ -67,8 +68,8 @@ type Status struct {
 	BatchBusy          int                `json:"batch_busy"`
 	ActiveSessions     int                `json:"active_sessions"`
 	ChaosRunning       bool               `json:"chaos_running"`
-	PrimarySemanticCB  SBSnapshot         `json:"primary_semantic_cb"`
-	FallbackSemanticCB SBSnapshot         `json:"fallback_semantic_cb"`
+	PrimarySemanticCB  quality.SBSnapshot         `json:"primary_semantic_cb"`
+	FallbackSemanticCB quality.SBSnapshot         `json:"fallback_semantic_cb"`
 	DegradeMode        bool               `json:"degrade_mode"`
 	Costs              CostStats          `json:"costs"`
 	TierCounts         TierRequestCounts  `json:"tier_counts"`
@@ -86,9 +87,9 @@ type Agent struct {
 	degradedPrimary *provider.DegradedWrapper
 	primaryCB      *circuitbreaker.Breaker
 	fallbackCB     *circuitbreaker.Breaker
-	primarySemCB   *SemanticBreaker
-	fallbackSemCB  *SemanticBreaker
-	qualityEval    *QualityEvaluator
+	primarySemCB   *quality.SemanticBreaker
+	fallbackSemCB  *quality.SemanticBreaker
+	qualityEval    *quality.QualityEvaluator
 	hedger         *hedge.Hedge
 	interactiveBH  *bulkhead.Bulkhead
 	batchBH        *bulkhead.Bulkhead
@@ -147,8 +148,8 @@ func newAgent(ollamaURL string) *Agent {
 	}
 	a.webhook = newWebhookDispatcher()
 
-	a.primarySemCB = NewSemanticBreaker(DefaultSBConfig).
-		WithStateChangeCallback(func(prev, next SBState, reason string, avg float64) {
+	a.primarySemCB = quality.NewSemanticBreaker(quality.DefaultSBConfig).
+		WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
 			a.webhook.Fire(WebhookEvent{
 				Event:      fmt.Sprintf("semantic_cb_%s", next),
 				Model:      ModelPrimary,
@@ -160,14 +161,14 @@ func newAgent(ollamaURL string) *Agent {
 			})
 		})
 
-	a.fallbackSemCB = NewSemanticBreaker(SemanticBreakerConfig{
+	a.fallbackSemCB = quality.NewSemanticBreaker(quality.SemanticBreakerConfig{
 		WindowSize:        6,
 		MinSamples:        2,
 		DegradedThreshold: 0.55,
 		FailingThreshold:  0.35,
 		OpenTimeout:       30 * time.Second,
 		RecoverySamples:   2,
-	}).WithStateChangeCallback(func(prev, next SBState, reason string, avg float64) {
+	}).WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
 		a.webhook.Fire(WebhookEvent{
 			Event:      fmt.Sprintf("semantic_cb_%s", next),
 			Model:      ModelFallback,
@@ -182,7 +183,7 @@ func newAgent(ollamaURL string) *Agent {
 	a.costs = newCostTracker()
 	a.latency = newLatencyTracker()
 	a.scoreHistory = newScoreHistory(60)
-	a.qualityEval = newQualityEvaluator(a.embedder.Embed)
+	a.qualityEval = quality.NewEvaluator(a.embedder.Embed)
 	a.cache = newSemanticCache(10*time.Minute, a.embedder.Embed)
 	a.tools = newToolRegistry(a)
 	a.sessions = newSessionStore()
@@ -421,21 +422,21 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *Trace) (strin
 		return "", false
 	}
 
-	quality := a.qualityEval.Evaluate(ctx, prompt, result)
-	a.primarySemCB.Record(quality.Score, quality)
-	qualityGauge.WithLabelValues("primary").Set(quality.Score)
+	qr := a.qualityEval.Evaluate(ctx, prompt, result)
+	a.primarySemCB.Record(qr.Score, qr)
+	qualityGauge.WithLabelValues("primary").Set(qr.Score)
 
-	step.QualityScore = &quality.Score
+	step.QualityScore = &qr.Score
 	step.SemanticCB = string(a.primarySemCB.State())
-	if len(quality.Signals) > 0 {
-		names := make([]string, len(quality.Signals))
-		for i, s := range quality.Signals {
+	if len(qr.Signals) > 0 {
+		names := make([]string, len(qr.Signals))
+		for i, s := range qr.Signals {
 			names[i] = s.Name
 		}
 		step.QualitySignals = names
 	}
 
-	if quality.Score < QualityAcceptable && len(quality.Signals) > 0 {
+	if qr.Score < quality.QualityAcceptable && len(qr.Signals) > 0 {
 		step.Outcome = OutcomeSemanticFailure
 		return "", false
 	}
@@ -472,10 +473,10 @@ func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *Trace) (stri
 		if err != nil {
 			return err
 		}
-		quality := a.qualityEval.Evaluate(ctx, prompt, text)
-		a.fallbackSemCB.Record(quality.Score, quality)
-		qualityGauge.WithLabelValues("fallback").Set(quality.Score)
-		step.QualityScore = &quality.Score
+		qr := a.qualityEval.Evaluate(ctx, prompt, text)
+		a.fallbackSemCB.Record(qr.Score, qr)
+		qualityGauge.WithLabelValues("fallback").Set(qr.Score)
+		step.QualityScore = &qr.Score
 		step.SemanticCB = string(a.fallbackSemCB.State())
 		result = text
 		return nil
@@ -541,7 +542,7 @@ func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out ch
 
 			// Quality gate: check every 30 tokens for hallucination markers.
 			if tokenCount%30 == 0 && tokenCount <= 120 {
-				hallScore, reason := hallucinationScore(buf.String())
+				hallScore, reason := quality.HallucinationScore(buf.String())
 				if hallScore < 0.5 {
 					tripped = true
 					cancelStream() // abort primary stream
@@ -590,10 +591,10 @@ func (a *Agent) EnableDegradeMode() { a.degradedPrimary.Enable() }
 func (a *Agent) DisableDegradeMode() { a.degradedPrimary.Disable() }
 
 // PrimarySemanticSnapshot returns the primary model's semantic CB snapshot.
-func (a *Agent) PrimarySemanticSnapshot() SBSnapshot { return a.primarySemCB.Snapshot() }
+func (a *Agent) PrimarySemanticSnapshot() quality.SBSnapshot { return a.primarySemCB.Snapshot() }
 
 // FallbackSemanticSnapshot returns the fallback model's semantic CB snapshot.
-func (a *Agent) FallbackSemanticSnapshot() SBSnapshot { return a.fallbackSemCB.Snapshot() }
+func (a *Agent) FallbackSemanticSnapshot() quality.SBSnapshot { return a.fallbackSemCB.Snapshot() }
 
 // GetTrace returns a trace by ID.
 func (a *Agent) GetTrace(id string) *Trace { return a.traces.Get(id) }

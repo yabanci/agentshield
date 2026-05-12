@@ -3,7 +3,7 @@
 // QualityEvaluator scores an LLM response without any external API calls.
 // Four independent signals combine into a single 0.0–1.0 quality score.
 // Low score → SemanticBreaker records a failure → may open the circuit.
-package agent
+package quality
 
 import (
 	"context"
@@ -44,7 +44,9 @@ type QualityEvaluator struct {
 	embedder    Embedder // optional; nil = skip coherence signal
 }
 
-func newQualityEvaluator(embedder Embedder) *QualityEvaluator {
+// NewEvaluator constructs a QualityEvaluator. embedder may be nil to skip
+// the coherence signal.
+func NewEvaluator(embedder Embedder) *QualityEvaluator {
 	return &QualityEvaluator{
 		embedder:  embedder,
 		lenWindow: 20,
@@ -54,7 +56,7 @@ func newQualityEvaluator(embedder Embedder) *QualityEvaluator {
 
 // NewTestQualityEvaluator creates an evaluator for use in tests.
 func NewTestQualityEvaluator(embedder Embedder) *QualityEvaluator {
-	return newQualityEvaluator(embedder)
+	return NewEvaluator(embedder)
 }
 
 // Evaluate scores a (prompt, response) pair.
@@ -91,7 +93,7 @@ func (e *QualityEvaluator) Evaluate(ctx context.Context, prompt, response string
 	}
 
 	// ── Signal 3: Hallucination markers (weight 0.40) ───────────────────────
-	hallScore, hallDetail := hallucinationScore(response)
+	hallScore, hallDetail := HallucinationScore(response)
 	if hallScore < 1.0 {
 		penalty := (1.0 - hallScore) * 0.40
 		signals = append(signals, QualitySignal{"hallucination_marker", penalty, hallDetail})
@@ -205,7 +207,7 @@ func (e *QualityEvaluator) avgLength() float64 {
 	return float64(sum) / float64(end)
 }
 
-// hallucinationScore penalises known refusal/hallucination phrases.
+// HallucinationScore penalises known refusal/hallucination phrases.
 var hallucinationPatterns = []string{
 	"as an ai language model",
 	"i cannot and will not",
@@ -218,7 +220,7 @@ var hallucinationPatterns = []string{
 	"i'm just an ai",
 }
 
-func hallucinationScore(text string) (float64, string) {
+func HallucinationScore(text string) (float64, string) {
 	lower := strings.ToLower(text)
 	hits := 0
 	var matched []string

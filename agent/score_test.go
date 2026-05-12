@@ -4,17 +4,18 @@ import (
 	"testing"
 
 	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/quality"
 )
 
 func healthyStatus() agent.Status {
 	return agent.Status{
 		PrimaryBreaker:  "closed",
 		FallbackBreaker: "closed",
-		PrimarySemanticCB: agent.SBSnapshot{
-			State: agent.SBHealthy, AvgQuality: 0.92,
+		PrimarySemanticCB: quality.SBSnapshot{
+			State: quality.SBHealthy, AvgQuality: 0.92,
 		},
-		FallbackSemanticCB: agent.SBSnapshot{
-			State: agent.SBHealthy, AvgQuality: 0.88,
+		FallbackSemanticCB: quality.SBSnapshot{
+			State: quality.SBHealthy, AvgQuality: 0.88,
 		},
 		CacheSize: 40, // fully warm cache
 		TierCounts: agent.TierRequestCounts{
@@ -55,7 +56,7 @@ func TestScore_KilledPrimaryReducesScore(t *testing.T) {
 
 func TestScore_SemanticFailureReducesQualityComponent(t *testing.T) {
 	s := healthyStatus()
-	s.PrimarySemanticCB = agent.SBSnapshot{State: agent.SBFailing, AvgQuality: 0.15}
+	s.PrimarySemanticCB = quality.SBSnapshot{State: quality.SBFailing, AvgQuality: 0.15}
 
 	score := agent.ComputeScore(s)
 	// Primary failing → primary contribution = 0; only fallback (8) remains.
@@ -69,8 +70,8 @@ func TestScore_BothCBsOpenScoredF(t *testing.T) {
 	s := agent.Status{
 		PrimaryKilled:  true,
 		FallbackKilled: true,
-		PrimarySemanticCB: agent.SBSnapshot{State: agent.SBFailing},
-		FallbackSemanticCB: agent.SBSnapshot{State: agent.SBFailing},
+		PrimarySemanticCB: quality.SBSnapshot{State: quality.SBFailing},
+		FallbackSemanticCB: quality.SBSnapshot{State: quality.SBFailing},
 		TierCounts: agent.TierRequestCounts{Denied: 10},
 	}
 	score := agent.ComputeScore(s)
@@ -95,8 +96,8 @@ func TestScore_ColdStartGetsFullCachePoints(t *testing.T) {
 	s := agent.Status{
 		PrimaryBreaker:  "closed",
 		FallbackBreaker: "closed",
-		PrimarySemanticCB: agent.SBSnapshot{State: agent.SBHealthy},
-		FallbackSemanticCB: agent.SBSnapshot{State: agent.SBHealthy},
+		PrimarySemanticCB: quality.SBSnapshot{State: quality.SBHealthy},
+		FallbackSemanticCB: quality.SBSnapshot{State: quality.SBHealthy},
 		// No traffic, no cache entries yet
 		CacheSize:  0,
 		TierCounts: agent.TierRequestCounts{},
@@ -126,8 +127,8 @@ func TestScore_AllComponentsBounded(t *testing.T) {
 	statuses := []agent.Status{
 		healthyStatus(),
 		{PrimaryKilled: true, FallbackKilled: true},
-		{PrimarySemanticCB: agent.SBSnapshot{State: agent.SBFailing},
-			FallbackSemanticCB: agent.SBSnapshot{State: agent.SBFailing}},
+		{PrimarySemanticCB: quality.SBSnapshot{State: quality.SBFailing},
+			FallbackSemanticCB: quality.SBSnapshot{State: quality.SBFailing}},
 	}
 
 	for _, s := range statuses {

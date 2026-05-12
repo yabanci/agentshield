@@ -8,7 +8,11 @@
 //   Latency           — are responses fast enough to be useful?
 package agent
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/yabanci/agentshield/quality"
+)
 
 // ResilienceScore is the overall health of the agent's resilience stack.
 type ResilienceScore struct {
@@ -55,11 +59,11 @@ func ComputeScore(s Status) ResilienceScore {
 
 	pScore := 0
 	switch pState {
-	case SBHealthy:
+	case quality.SBHealthy:
 		pScore = 12
-	case SBDegraded:
+	case quality.SBDegraded:
 		pScore = 6
-	case SBFailing:
+	case quality.SBFailing:
 		pScore = 0
 	}
 	if s.DegradeMode {
@@ -68,11 +72,11 @@ func ComputeScore(s Status) ResilienceScore {
 
 	fScore := 0
 	switch fState {
-	case SBHealthy:
+	case quality.SBHealthy:
 		fScore = 8
-	case SBDegraded:
+	case quality.SBDegraded:
 		fScore = 4
-	case SBFailing:
+	case quality.SBFailing:
 		fScore = 0
 	}
 	b.SemanticQuality = pScore + fScore

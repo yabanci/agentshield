@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/quality"
 )
 
 func TestWebhook_FiredOnSemanticCBStateChange(t *testing.T) {
@@ -30,7 +31,7 @@ func TestWebhook_FiredOnSemanticCBStateChange(t *testing.T) {
 	defer webhookSrv.Close()
 
 	// Set up breaker with short timeout and fast trip
-	cfg := agent.SemanticBreakerConfig{
+	cfg := quality.SemanticBreakerConfig{
 		WindowSize:        4,
 		MinSamples:        2,
 		DegradedThreshold: 0.65,
@@ -42,8 +43,8 @@ func TestWebhook_FiredOnSemanticCBStateChange(t *testing.T) {
 	dispatcher := agent.NewTestWebhookDispatcher()
 	dispatcher.SetURL(webhookSrv.URL)
 
-	sb := agent.NewSemanticBreaker(cfg)
-	sb.WithStateChangeCallback(func(prev, next agent.SBState, reason string, avg float64) {
+	sb := quality.NewSemanticBreaker(cfg)
+	sb.WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
 		dispatcher.Fire(agent.WebhookEvent{
 			Event:      "semantic_cb_" + string(next),
 			Model:      "primary",
@@ -57,7 +58,7 @@ func TestWebhook_FiredOnSemanticCBStateChange(t *testing.T) {
 
 	// Record bad scores to trip the breaker
 	for i := 0; i < 3; i++ {
-		sb.Record(0.10, agent.QualityResult{Score: 0.10})
+		sb.Record(0.10, quality.QualityResult{Score: 0.10})
 	}
 
 	// Give webhook goroutine time to fire

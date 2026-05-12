@@ -3,6 +3,8 @@ package agent
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/yabanci/agentshield/quality"
 )
 
 var (
@@ -69,13 +71,13 @@ func cbStateValue(s string) float64 {
 	}
 }
 
-func sbStateValue(s SBState) float64 {
+func sbStateValue(s quality.SBState) float64 {
 	switch s {
-	case SBHealthy:
+	case quality.SBHealthy:
 		return 0
-	case SBDegraded:
+	case quality.SBDegraded:
 		return 1
-	default: // SBFailing
+	default: // quality.SBFailing
 		return 2
 	}
 }
