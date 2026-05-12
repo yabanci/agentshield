@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/api/web"
 	"github.com/yabanci/agentshield/config"
 )
 
@@ -91,9 +92,15 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /config/webhook", h.getWebhook)
 	mux.HandleFunc("DELETE /config/webhook", h.requireAuth(h.clearWebhook))
 
-	// Dashboard
+	// Dashboard + static assets
 	mux.HandleFunc("GET /", h.dashboard)
+	mux.Handle("GET /static/", web.StaticHandler())
 }
+
+// dashboardTmpl is parsed once at process start. ParseFS panics on bad templates,
+// which is what we want at startup — a misshipped template should not be a
+// runtime mystery on first request.
+var dashboardTmpl = web.Templates()
 
 // ─── Chat ──────────────────────────────────────────────────────────────────
 
@@ -399,7 +406,9 @@ func (h *Handler) clearWebhook(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(dashboardHTML))
+	if err := dashboardTmpl.ExecuteTemplate(w, "dashboard.html.tmpl", nil); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
