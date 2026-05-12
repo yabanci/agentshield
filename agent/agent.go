@@ -28,6 +28,7 @@ import (
 	"github.com/yabanci/agentshield/cache"
 	"github.com/yabanci/agentshield/config"
 	"github.com/yabanci/agentshield/memory"
+	"github.com/yabanci/agentshield/orchestrator"
 	"github.com/yabanci/agentshield/provider"
 	"github.com/yabanci/agentshield/quality"
 	"github.com/yabanci/agentshield/telemetry"
@@ -102,9 +103,7 @@ type Agent struct {
 	tools          *ToolRegistry
 	memory         *memory.Store
 	telemetry      *telemetry.Store
-	chaosMu        atomic.Bool
-	primaryKilled  atomic.Bool
-	fallbackKilled atomic.Bool
+	chaos          *orchestrator.Chaos
 	totalRequests  atomic.Int64
 }
 
@@ -120,12 +119,12 @@ func newAgent(ollamaURL string) *Agent {
 	degraded := provider.NewDegradedWrapper(ol)
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	a := &Agent{
-		lifeCtx:         lifeCtx,
-		lifeCancel:      lifeCancel,
-		primary:         degraded,
-		fallback:        ol,
-		embedder:        ol,
-		degradedPrimary: degraded,
+		lifeCtx:    lifeCtx,
+		lifeCancel: lifeCancel,
+		primary:    degraded,
+		fallback:   ol,
+		embedder:   ol,
+		chaos:      orchestrator.NewChaos(degraded),
 		primaryCB: circuitbreaker.NewAdaptive(
 			20, 0.5, 5,
 			circuitbreaker.WithOpenTimeout(15*time.Second),
@@ -232,13 +231,13 @@ func (a *Agent) LifecycleContext() context.Context {
 // StartChaos runs the automated chaos scenario asynchronously.
 // Returns a channel of events and an error if chaos is already running.
 func (a *Agent) StartChaos(ctx context.Context) (<-chan ChaosEvent, error) {
-	if !a.chaosMu.CompareAndSwap(false, true) {
+	if !a.chaos.TryStart() {
 		return nil, fmt.Errorf("chaos scenario already running")
 	}
 	ch := make(chan ChaosEvent, 64)
 	go func() {
 		defer close(ch)
-		defer a.chaosMu.Store(false)
+		defer a.chaos.Done()
 		a.RunChaos(ctx, ch)
 	}()
 	return ch, nil
@@ -379,7 +378,7 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *memory.Trace)
 		tr.AddStep(step)
 	}()
 
-	if a.primaryKilled.Load() {
+	if a.chaos.IsPrimaryKilled() {
 		step.Outcome = memory.OutcomeKilled
 		return "", false
 	}
@@ -453,7 +452,7 @@ func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *memory.Trace
 		tr.AddStep(step)
 	}()
 
-	if a.fallbackKilled.Load() {
+	if a.chaos.IsFallbackKilled() {
 		step.Outcome = memory.OutcomeKilled
 		return "", false
 	}
@@ -509,7 +508,7 @@ type StreamToken struct {
 // the stream aborts and automatically continues from the fallback model.
 // The caller receives a StreamToken{Switched: true} event at the switch point.
 func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out chan<- StreamToken) (Tier, error) {
-	canUsePrimary := !a.primaryKilled.Load() &&
+	canUsePrimary := !a.chaos.IsPrimaryKilled() &&
 		!a.primarySemCB.ShouldBlock() &&
 		a.primaryCB.State().String() == "closed"
 
@@ -572,19 +571,19 @@ func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out ch
 }
 
 // KillPrimary / RestorePrimary simulate primary model failures.
-func (a *Agent) KillPrimary()   { a.primaryKilled.Store(true) }
-func (a *Agent) RestorePrimary() { a.primaryKilled.Store(false) }
+func (a *Agent) KillPrimary() { a.chaos.KillPrimary() }
+func (a *Agent) RestorePrimary() { a.chaos.RestorePrimary() }
 
 // KillFallback / RestoreFallback simulate fallback model failures.
-func (a *Agent) KillFallback()    { a.fallbackKilled.Store(true) }
-func (a *Agent) RestoreFallback() { a.fallbackKilled.Store(false) }
+func (a *Agent) KillFallback()    { a.chaos.KillFallback() }
+func (a *Agent) RestoreFallback() { a.chaos.RestoreFallback() }
 
 // EnableDegradeMode makes primary return low-quality responses (demo).
 // Implemented as a decorator toggle — chaos is no longer a branch in the hot path.
-func (a *Agent) EnableDegradeMode() { a.degradedPrimary.Enable() }
+func (a *Agent) EnableDegradeMode() { a.chaos.EnableDegrade() }
 
 // DisableDegradeMode restores normal primary responses.
-func (a *Agent) DisableDegradeMode() { a.degradedPrimary.Disable() }
+func (a *Agent) DisableDegradeMode() { a.chaos.DisableDegrade() }
 
 // PrimarySemanticSnapshot returns the primary model's semantic CB snapshot.
 func (a *Agent) PrimarySemanticSnapshot() quality.SBSnapshot { return a.primarySemCB.Snapshot() }
@@ -610,11 +609,11 @@ func (a *Agent) WebhookURL() string { return a.telemetry.Webhook.URL() }
 // Status returns a live snapshot of all resilience layers.
 func (a *Agent) Status() Status {
 	primaryState := a.primaryCB.State().String()
-	if a.primaryKilled.Load() {
+	if a.chaos.IsPrimaryKilled() {
 		primaryState = "killed"
 	}
 	fallbackState := a.fallbackCB.State().String()
-	if a.fallbackKilled.Load() {
+	if a.chaos.IsFallbackKilled() {
 		fallbackState = "killed"
 	}
 	pSem := a.primarySemCB.Snapshot()
@@ -630,8 +629,8 @@ func (a *Agent) Status() Status {
 	s := Status{
 		PrimaryBreaker:     primaryState,
 		FallbackBreaker:    fallbackState,
-		PrimaryKilled:      a.primaryKilled.Load(),
-		FallbackKilled:     a.fallbackKilled.Load(),
+		PrimaryKilled:      a.chaos.IsPrimaryKilled(),
+		FallbackKilled:     a.chaos.IsFallbackKilled(),
 		CacheSize:          a.cache.Size(),
 		TotalRequests:      a.totalRequests.Load(),
 		ErrorRate:          a.primaryCB.ErrorRate(),
@@ -640,10 +639,10 @@ func (a *Agent) Status() Status {
 		InteractiveBusy:    a.interactiveBH.ActiveCount(),
 		BatchBusy:          a.batchBH.ActiveCount(),
 		ActiveSessions:     a.memory.Sessions.Count(),
-		ChaosRunning:       a.chaosMu.Load(),
+		ChaosRunning:       a.chaos.IsRunning(),
 		PrimarySemanticCB:  pSem,
 		FallbackSemanticCB: fSem,
-		DegradeMode:        a.degradedPrimary.IsEnabled(),
+		DegradeMode:        a.chaos.IsDegradeEnabled(),
 		Costs:              costs,
 		TierCounts:         tierCounts,
 		Latency:            lat,
