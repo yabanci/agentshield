@@ -15,15 +15,19 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	// Bootstrap logger uses defaults; once config is loaded, we rebuild from cfg.
+	bootstrap := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
-		logger.Error("config load failed", "err", err)
+		bootstrap.Error("config load failed", "err", err)
 		os.Exit(1)
 	}
 
-	a := agent.NewWithConfig(cfg)
+	logger := cfg.NewLogger(os.Stdout)
+	slog.SetDefault(logger)
+
+	a := agent.NewWithConfig(cfg, logger)
 	defer a.Stop()
 	h := api.New(a, cfg)
 

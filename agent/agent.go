@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/yabanci/agentshield/cache"
 	"github.com/yabanci/agentshield/config"
+	"github.com/yabanci/agentshield/internal/logkeys"
 	"github.com/yabanci/agentshield/memory"
 	"github.com/yabanci/agentshield/orchestrator"
 	"github.com/yabanci/agentshield/provider"
@@ -86,6 +88,7 @@ type Status struct {
 type Agent struct {
 	lifeCtx        context.Context
 	lifeCancel     context.CancelFunc
+	log            *slog.Logger
 	primary   provider.LLMProvider
 	fallback  provider.LLMProvider
 	embedder  provider.Embedder
@@ -103,7 +106,12 @@ type Agent struct {
 	totalRequests  atomic.Int64
 }
 
-func newAgent(ollamaURL string) *Agent {
+func newAgent(ollamaURL string, log *slog.Logger) *Agent {
+	if log == nil {
+		log = slog.Default()
+	}
+	log = log.With(slog.String(logkeys.Component, "agent"))
+
 	ol := provider.NewOllama(config.ProviderConfig{
 		Kind:    "ollama",
 		BaseURL: ollamaURL,
@@ -117,6 +125,7 @@ func newAgent(ollamaURL string) *Agent {
 	a := &Agent{
 		lifeCtx:    lifeCtx,
 		lifeCancel: lifeCancel,
+		log:        log,
 		primary:    degraded,
 		fallback:   ol,
 		embedder:   ol,
@@ -185,23 +194,24 @@ func newAgent(ollamaURL string) *Agent {
 // New creates an Agent by loading config from environment.
 // Convenience wrapper for callers that don't yet hold a *config.Config.
 // Panics on invalid config — startup-time failure is preferable to runtime surprises.
+// Uses slog.Default() for logging; use NewWithConfig for explicit logger.
 func New() *Agent {
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
 		panic("agentshield config: " + err.Error())
 	}
-	return NewWithConfig(cfg)
+	return NewWithConfig(cfg, slog.Default())
 }
 
-// NewWithConfig creates an Agent from an explicit Config.
-// Preferred form for production wiring.
-func NewWithConfig(cfg *config.Config) *Agent {
-	return newAgent(cfg.Provider.BaseURL)
+// NewWithConfig creates an Agent from an explicit Config and logger.
+// Preferred form for production wiring. If log is nil, slog.Default() is used.
+func NewWithConfig(cfg *config.Config, log *slog.Logger) *Agent {
+	return newAgent(cfg.Provider.BaseURL, log)
 }
 
 // NewWithOllamaURL creates an Agent for testing — no background cleanup goroutines.
 func NewWithOllamaURL(url string) *Agent {
-	a := newAgent(url)
+	a := newAgent(url, slog.Default())
 	a.cache = cache.New(10*time.Minute, nil)
 	// Replace stores with test variants that don't start background goroutines.
 	a.memory.Traces = memory.NewTestTraceStore()
@@ -312,6 +322,7 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 // degrade runs the 4-tier degradation chain, recording each attempt in tr.
 func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (Response, error) {
 	start := time.Now()
+	reqLog := a.log.With(slog.String(logkeys.TraceID, tr.ID))
 
 	// Tier 1: primary model (hedged + transport CB + semantic CB + retry)
 	if text, ok := a.tryPrimary(ctx, prompt, tr); ok {
@@ -321,6 +332,11 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (R
 		a.telemetry.Latency.Record(TierPrimary, dur)
 		a.cache.Set(ctx, prompt, text)
 		a.telemetry.Costs.Record(TierPrimary, prompt, text)
+		reqLog.Info("tier served",
+			slog.String(logkeys.Tier, string(TierPrimary)),
+			slog.String(logkeys.Outcome, "success"),
+			slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
+		)
 		return Response{Text: text, Tier: TierPrimary}, nil
 	}
 
@@ -332,6 +348,11 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (R
 		a.telemetry.Latency.Record(TierFallback, dur)
 		a.cache.Set(ctx, prompt, text)
 		a.telemetry.Costs.Record(TierFallback, prompt, text)
+		reqLog.Warn("tier served via fallback",
+			slog.String(logkeys.Tier, string(TierFallback)),
+			slog.String(logkeys.Outcome, "success"),
+			slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
+		)
 		return Response{Text: text, Tier: TierFallback}, nil
 	}
 
@@ -343,6 +364,11 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (R
 		tr.AddStep(memory.TraceStep{Tier: TierCache, Outcome: memory.OutcomeCacheHit,
 			LatencyMS: dur.Milliseconds()})
 		a.telemetry.Costs.Record(TierCache, prompt, cached)
+		reqLog.Warn("tier served from semantic cache",
+			slog.String(logkeys.Tier, string(TierCache)),
+			slog.String(logkeys.Outcome, "cache_hit"),
+			slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
+		)
 		return Response{Text: cached, Tier: TierCache, Cached: true}, nil
 	}
 
@@ -351,6 +377,11 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (R
 	tr.AddStep(memory.TraceStep{Tier: TierDegraded, Outcome: memory.OutcomeGracefulDenial,
 		LatencyMS: time.Since(start).Milliseconds()})
 	a.telemetry.Costs.Record(TierDegraded, prompt, "")
+	reqLog.Error("all tiers exhausted — graceful denial",
+		slog.String(logkeys.Tier, string(TierDegraded)),
+		slog.String(logkeys.Outcome, "graceful_denial"),
+		slog.Int64(logkeys.LatencyMS, time.Since(start).Milliseconds()),
+	)
 	return Response{
 		Text: "All AI tiers are currently unavailable. Please try again shortly.",
 		Tier: TierDegraded,

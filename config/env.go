@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
+	"strings"
 )
 
 // LoadFromEnv builds a Config from defaults, overrides with environment variables,
@@ -24,6 +26,21 @@ func LoadFromEnv() (*Config, error) {
 	}
 	if os.Getenv("AGENTSHIELD_ALLOW_PRIVATE_WEBHOOK") == "true" {
 		c.Webhook.AllowPrivate = true
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		switch strings.ToLower(v) {
+		case "debug":
+			c.Logger.Level = slog.LevelDebug
+		case "info":
+			c.Logger.Level = slog.LevelInfo
+		case "warn":
+			c.Logger.Level = slog.LevelWarn
+		case "error":
+			c.Logger.Level = slog.LevelError
+		}
+	}
+	if v := os.Getenv("LOG_FORMAT"); v == "json" || v == "text" {
+		c.Logger.Format = v
 	}
 
 	if err := c.Validate(); err != nil {
