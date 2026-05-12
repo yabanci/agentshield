@@ -100,12 +100,8 @@ type Agent struct {
 	shedder        *loadshed.Shedder
 	cache          *cache.SemanticCache
 	tools          *ToolRegistry
-	sessions       *memory.SessionStore
-	traces         *memory.TraceStore
-	webhook        *telemetry.WebhookDispatcher
-	costs          *telemetry.CostTracker
-	latency        *telemetry.LatencyTracker
-	scoreHistory   *memory.ScoreHistory
+	memory         *memory.Store
+	telemetry      *telemetry.Store
 	chaosMu        atomic.Bool
 	primaryKilled  atomic.Bool
 	fallbackKilled atomic.Bool
@@ -150,11 +146,12 @@ func newAgent(ollamaURL string) *Agent {
 		// Loadshed: adaptive AIMD — starts at 50 concurrent, shrinks under load.
 		shedder: loadshed.New(50, 5*time.Second),
 	}
-	a.webhook = telemetry.NewWebhookDispatcher()
+	a.telemetry = telemetry.NewStore()
+	a.memory = memory.NewStore(60)
 
 	a.primarySemCB = quality.NewSemanticBreaker(quality.DefaultSBConfig).
 		WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
-			a.webhook.Fire(telemetry.WebhookEvent{
+			a.telemetry.Webhook.Fire(telemetry.WebhookEvent{
 				Event:      fmt.Sprintf("semantic_cb_%s", next),
 				Model:      ModelPrimary,
 				PrevState:  string(prev),
@@ -173,7 +170,7 @@ func newAgent(ollamaURL string) *Agent {
 		OpenTimeout:       30 * time.Second,
 		RecoverySamples:   2,
 	}).WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
-		a.webhook.Fire(telemetry.WebhookEvent{
+		a.telemetry.Webhook.Fire(telemetry.WebhookEvent{
 			Event:      fmt.Sprintf("semantic_cb_%s", next),
 			Model:      ModelFallback,
 			PrevState:  string(prev),
@@ -184,14 +181,9 @@ func newAgent(ollamaURL string) *Agent {
 		})
 	})
 
-	a.costs = telemetry.NewCostTracker()
-	a.latency = telemetry.NewLatencyTracker()
-	a.scoreHistory = memory.NewScoreHistory(60)
 	a.qualityEval = quality.NewEvaluator(a.embedder.Embed)
 	a.cache = cache.New(10*time.Minute, a.embedder.Embed)
 	a.tools = newToolRegistry(a)
-	a.sessions = memory.NewSessionStore()
-	a.traces = memory.NewTraceStore()
 	return a
 }
 
@@ -217,8 +209,8 @@ func NewWithOllamaURL(url string) *Agent {
 	a := newAgent(url)
 	a.cache = cache.New(10*time.Minute, nil)
 	// Replace stores with test variants that don't start background goroutines.
-	a.traces = memory.NewTestTraceStore()
-	a.sessions = memory.NewTestSessionStore()
+	a.memory.Traces = memory.NewTestTraceStore()
+	a.memory.Sessions = memory.NewTestSessionStore()
 	return a
 }
 
@@ -226,8 +218,8 @@ func NewWithOllamaURL(url string) *Agent {
 // Call when the Agent is no longer needed.
 func (a *Agent) Stop() {
 	a.lifeCancel()
-	a.traces.Stop()
-	a.sessions.Stop()
+	a.memory.Traces.Stop()
+	a.memory.Sessions.Stop()
 }
 
 // LifecycleContext returns a context that is cancelled when the Agent is
@@ -253,13 +245,13 @@ func (a *Agent) StartChaos(ctx context.Context) (<-chan ChaosEvent, error) {
 }
 
 // GetSession returns session history by ID.
-func (a *Agent) GetSession(id string) *memory.Session { return a.sessions.Get(id) }
+func (a *Agent) GetSession(id string) *memory.Session { return a.memory.Sessions.Get(id) }
 
 // ListSessions returns all active sessions.
-func (a *Agent) ListSessions() []memory.Session { return a.sessions.List() }
+func (a *Agent) ListSessions() []memory.Session { return a.memory.Sessions.List() }
 
 // DeleteSession removes a session.
-func (a *Agent) DeleteSession(id string) { a.sessions.Delete(id) }
+func (a *Agent) DeleteSession(id string) { a.memory.Sessions.Delete(id) }
 
 // ToolList returns metadata about registered tools.
 func (a *Agent) ToolList() []map[string]string { return a.tools.List() }
@@ -282,7 +274,7 @@ func (a *Agent) AskBatch(ctx context.Context, prompt string) (Response, error) {
 
 func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, error) {
 	a.totalRequests.Add(1)
-	tr := a.traces.New(prompt)
+	tr := a.memory.Traces.New(prompt)
 
 	var resp Response
 	err := a.shedder.Do(ctx, func(ctx context.Context) error {
@@ -301,7 +293,7 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 		telemetry.LoadshedTotal.Inc()
 		resp = Response{Text: "Server is overloaded. Please try again in a moment.", Tier: TierDegraded}
 		tr.AddStep(memory.TraceStep{Tier: TierDegraded, Outcome: memory.OutcomeGracefulDenial, LatencyMS: 0})
-		a.costs.Record(TierDegraded, prompt, "") // keep TierCounts in sync with TotalRequests
+		a.telemetry.Costs.Record(TierDegraded, prompt, "") // keep TierCounts in sync with TotalRequests
 	} else if errors.Is(err, bulkhead.ErrFull) {
 		telemetry.BulkheadFullTotal.WithLabelValues(func() string {
 			if batch {
@@ -311,7 +303,7 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 		}()).Inc()
 		resp = Response{Text: "Too many concurrent requests. Please try again shortly.", Tier: TierDegraded}
 		tr.AddStep(memory.TraceStep{Tier: TierDegraded, Outcome: memory.OutcomeGracefulDenial, LatencyMS: 0})
-		a.costs.Record(TierDegraded, prompt, "") // keep TierCounts in sync with TotalRequests
+		a.telemetry.Costs.Record(TierDegraded, prompt, "") // keep TierCounts in sync with TotalRequests
 	} else if err != nil {
 		return resp, err
 	}
@@ -331,9 +323,9 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (R
 		dur := time.Since(start)
 		telemetry.RequestsTotal.WithLabelValues("primary").Inc()
 		telemetry.RequestDuration.WithLabelValues("primary").Observe(dur.Seconds())
-		a.latency.Record(TierPrimary, dur)
+		a.telemetry.Latency.Record(TierPrimary, dur)
 		a.cache.Set(ctx, prompt, text)
-		a.costs.Record(TierPrimary, prompt, text)
+		a.telemetry.Costs.Record(TierPrimary, prompt, text)
 		return Response{Text: text, Tier: TierPrimary}, nil
 	}
 
@@ -342,9 +334,9 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (R
 		dur := time.Since(start)
 		telemetry.RequestsTotal.WithLabelValues("fallback").Inc()
 		telemetry.RequestDuration.WithLabelValues("fallback").Observe(dur.Seconds())
-		a.latency.Record(TierFallback, dur)
+		a.telemetry.Latency.Record(TierFallback, dur)
 		a.cache.Set(ctx, prompt, text)
-		a.costs.Record(TierFallback, prompt, text)
+		a.telemetry.Costs.Record(TierFallback, prompt, text)
 		return Response{Text: text, Tier: TierFallback}, nil
 	}
 
@@ -352,10 +344,10 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (R
 	if cached, ok := a.cache.Get(ctx, prompt); ok {
 		dur := time.Since(start)
 		telemetry.RequestsTotal.WithLabelValues("cache").Inc()
-		a.latency.Record(TierCache, dur)
+		a.telemetry.Latency.Record(TierCache, dur)
 		tr.AddStep(memory.TraceStep{Tier: TierCache, Outcome: memory.OutcomeCacheHit,
 			LatencyMS: dur.Milliseconds()})
-		a.costs.Record(TierCache, prompt, cached)
+		a.telemetry.Costs.Record(TierCache, prompt, cached)
 		return Response{Text: cached, Tier: TierCache, Cached: true}, nil
 	}
 
@@ -363,7 +355,7 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (R
 	telemetry.RequestsTotal.WithLabelValues("degraded").Inc()
 	tr.AddStep(memory.TraceStep{Tier: TierDegraded, Outcome: memory.OutcomeGracefulDenial,
 		LatencyMS: time.Since(start).Milliseconds()})
-	a.costs.Record(TierDegraded, prompt, "")
+	a.telemetry.Costs.Record(TierDegraded, prompt, "")
 	return Response{
 		Text: "All AI tiers are currently unavailable. Please try again shortly.",
 		Tier: TierDegraded,
@@ -601,19 +593,19 @@ func (a *Agent) PrimarySemanticSnapshot() quality.SBSnapshot { return a.primaryS
 func (a *Agent) FallbackSemanticSnapshot() quality.SBSnapshot { return a.fallbackSemCB.Snapshot() }
 
 // GetTrace returns a trace by ID.
-func (a *Agent) GetTrace(id string) *memory.Trace { return a.traces.Get(id) }
+func (a *Agent) GetTrace(id string) *memory.Trace { return a.memory.Traces.Get(id) }
 
 // ScoreHistorySnapshot returns the recent score points for sparkline rendering.
-func (a *Agent) ScoreHistorySnapshot() []memory.ScorePoint { return a.scoreHistory.Snapshot() }
+func (a *Agent) ScoreHistorySnapshot() []memory.ScorePoint { return a.memory.ScoreHistory.Snapshot() }
 
 // SetWebhookURL configures the webhook endpoint.
-func (a *Agent) SetWebhookURL(url string) { a.webhook.SetURL(url) }
+func (a *Agent) SetWebhookURL(url string) { a.telemetry.Webhook.SetURL(url) }
 
 // ClearWebhookURL removes the webhook.
-func (a *Agent) ClearWebhookURL() { a.webhook.ClearURL() }
+func (a *Agent) ClearWebhookURL() { a.telemetry.Webhook.ClearURL() }
 
 // WebhookURL returns the currently configured webhook URL.
-func (a *Agent) WebhookURL() string { return a.webhook.URL() }
+func (a *Agent) WebhookURL() string { return a.telemetry.Webhook.URL() }
 
 // Status returns a live snapshot of all resilience layers.
 func (a *Agent) Status() Status {
@@ -630,10 +622,10 @@ func (a *Agent) Status() Status {
 	telemetry.SemanticCBStateGauge.WithLabelValues("primary").Set(telemetry.SBStateValue(pSem.State))
 	telemetry.SemanticCBStateGauge.WithLabelValues("fallback").Set(telemetry.SBStateValue(fSem.State))
 
-	pr, fr, cr, dr := a.costs.TierCounts()
+	pr, fr, cr, dr := a.telemetry.Costs.TierCounts()
 	tierCounts := telemetry.TierRequestCounts{Primary: pr, Fallback: fr, Cache: cr, Denied: dr}
-	costs := a.costs.Snapshot()
-	lat := a.latency.Snapshot()
+	costs := a.telemetry.Costs.Snapshot()
+	lat := a.telemetry.Latency.Snapshot()
 
 	s := Status{
 		PrimaryBreaker:     primaryState,
@@ -647,7 +639,7 @@ func (a *Agent) Status() Status {
 		LoadshedInflight:   a.shedder.Inflight(),
 		InteractiveBusy:    a.interactiveBH.ActiveCount(),
 		BatchBusy:          a.batchBH.ActiveCount(),
-		ActiveSessions:     a.sessions.Count(),
+		ActiveSessions:     a.memory.Sessions.Count(),
 		ChaosRunning:       a.chaosMu.Load(),
 		PrimarySemanticCB:  pSem,
 		FallbackSemanticCB: fSem,
@@ -669,7 +661,7 @@ func (a *Agent) Status() Status {
 		Costs:              s.Costs,
 		Latency:            s.Latency,
 	})
-	a.scoreHistory.Record(s.Score.Total)
+	a.memory.ScoreHistory.Record(s.Score.Total)
 	return s
 }
 

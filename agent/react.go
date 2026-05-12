@@ -37,11 +37,11 @@ type ReactResponse struct {
 // Each tool call has its own circuit breaker via ToolRegistry.
 func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactResponse, error) {
 	tools := a.tools
-	a.sessions.GetOrCreate(sessionID) // ensure session exists
+	a.memory.Sessions.GetOrCreate(sessionID) // ensure session exists
 
 	// Copy messages under lock before building history to avoid a data race
 	// if concurrent requests share the same session ID.
-	history := buildHistory(a.sessions.Messages(sessionID))
+	history := buildHistory(a.memory.Sessions.Messages(sessionID))
 
 	// Full prompt = system + history + current user question
 	fullPrompt := tools.SystemPrompt() + "\n\n" + history + "User: " + prompt + "\nAssistant:"
@@ -49,11 +49,11 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 	var steps []ReactStep
 	lastTier := TierPrimary
 	conversationCtx := fullPrompt
-	tr := a.traces.New(prompt)
+	tr := a.memory.Traces.New(prompt)
 
 	// done wraps every return path: finalizes the trace and sets TraceID.
 	done := func(answer string, turns int, tier Tier) ReactResponse {
-		a.sessions.Add(sessionID, memory.Message{Role: "assistant", Content: answer, Tier: tier, At: nowFn()})
+		a.memory.Sessions.Add(sessionID, memory.Message{Role: "assistant", Content: answer, Tier: tier, At: nowFn()})
 		tr.Finalize(tier)
 		return ReactResponse{
 			Answer:    answer,
@@ -65,7 +65,7 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 		}
 	}
 
-	a.sessions.Add(sessionID, memory.Message{Role: "user", Content: prompt, At: nowFn()})
+	a.memory.Sessions.Add(sessionID, memory.Message{Role: "user", Content: prompt, At: nowFn()})
 
 	for i := 0; i < maxReactIterations; i++ {
 		resp, err := a.degrade(ctx, conversationCtx, tr)
