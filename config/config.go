@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"time"
 )
@@ -25,6 +26,21 @@ type Config struct {
 type LoggerConfig struct {
 	Level  slog.Level
 	Format string // "text" | "json"
+}
+
+// NewLogger builds a *slog.Logger from cfg.Logger. The format selects between
+// TextHandler (human-friendly, default) and JSONHandler (production / log
+// aggregators). Pass os.Stdout in normal use.
+func (c *Config) NewLogger(out io.Writer) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: c.Logger.Level}
+	var h slog.Handler
+	switch c.Logger.Format {
+	case "json":
+		h = slog.NewJSONHandler(out, opts)
+	default:
+		h = slog.NewTextHandler(out, opts)
+	}
+	return slog.New(h)
 }
 
 type ProviderConfig struct {
