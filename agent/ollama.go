@@ -10,8 +10,6 @@ import (
 	"time"
 )
 
-const ollamaBaseURL = "http://localhost:11434"
-
 const EmbedModel = "nomic-embed-text"
 
 type ollamaClient struct {

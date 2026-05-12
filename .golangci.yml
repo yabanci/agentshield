@@ -8,3 +8,20 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+    - forbidigo
+
+  settings:
+    forbidigo:
+      forbid:
+        - pattern: '^os\.Getenv$'
+          msg: "Read environment variables in package config only; pass *config.Config to consumers."
+        - pattern: '^os\.LookupEnv$'
+          msg: "Read environment variables in package config only; pass *config.Config to consumers."
+      exclude-godoc-examples: false
+      analyze-types: true
+
+  exclusions:
+    rules:
+      - path: 'config/.*\.go'
+        linters:
+          - forbidigo
