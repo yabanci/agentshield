@@ -8,7 +8,7 @@
 //   Healthy  — quality is fine, requests pass through
 //   Degraded — quality is slipping, requests pass but we log warnings
 //   Failing  — quality is consistently bad, requests are blocked (circuit OPEN)
-package agent
+package quality
 
 import (
 	"fmt"

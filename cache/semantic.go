@@ -1,4 +1,4 @@
-package agent
+package cache
 
 import (
 	"context"
@@ -21,9 +21,9 @@ type cacheEntry struct {
 // Embedder generates a vector embedding for a text.
 type Embedder func(ctx context.Context, text string) ([]float64, error)
 
-// semanticCache stores responses and retrieves them by semantic similarity.
+// SemanticCache stores responses and retrieves them by semantic similarity.
 // Falls back to exact SHA-256 match when the embedder is unavailable.
-type semanticCache struct {
+type SemanticCache struct {
 	mu        sync.RWMutex
 	entries   []cacheEntry
 	ttl       time.Duration
@@ -31,8 +31,8 @@ type semanticCache struct {
 	threshold float64
 }
 
-func newSemanticCache(ttl time.Duration, embedder Embedder) *semanticCache {
-	return &semanticCache{
+func New(ttl time.Duration, embedder Embedder) *SemanticCache {
+	return &SemanticCache{
 		ttl:       ttl,
 		embedder:  embedder,
 		threshold: defaultSimilarityThreshold,
@@ -40,26 +40,26 @@ func newSemanticCache(ttl time.Duration, embedder Embedder) *semanticCache {
 }
 
 // TestCache exposes the internal cache for testing.
-type TestCache struct{ c *semanticCache }
+type TestCache struct{ c *SemanticCache }
 
 // NewTestSemanticCache creates a cache for use in tests.
 func NewTestSemanticCache(ttl time.Duration, embedder Embedder) *TestCache {
-	return &TestCache{c: newSemanticCache(ttl, embedder)}
+	return &TestCache{c: New(ttl, embedder)}
 }
 
 // SetForTest exposes set() for tests.
 func (t *TestCache) SetForTest(ctx context.Context, prompt, response string) {
-	t.c.set(ctx, prompt, response)
+	t.c.Set(ctx, prompt, response)
 }
 
 // GetForTest exposes get() for tests.
 func (t *TestCache) GetForTest(ctx context.Context, prompt string) (string, bool) {
-	return t.c.get(ctx, prompt)
+	return t.c.Get(ctx, prompt)
 }
 
 // get returns a cached response for the prompt.
 // Uses semantic similarity if embeddings are available, exact match otherwise.
-func (c *semanticCache) get(ctx context.Context, prompt string) (string, bool) {
+func (c *SemanticCache) Get(ctx context.Context, prompt string) (string, bool) {
 	c.mu.RLock()
 	entries := make([]cacheEntry, len(c.entries))
 	copy(entries, c.entries)
@@ -107,7 +107,7 @@ func (c *semanticCache) get(ctx context.Context, prompt string) (string, bool) {
 //
 // Until the embedding completes, only exact-match get() lookups will hit
 // this entry — semantic similarity matches will skip it (len(embedding)==0).
-func (c *semanticCache) set(ctx context.Context, prompt, response string) {
+func (c *SemanticCache) Set(ctx context.Context, prompt, response string) {
 	now := time.Now()
 	entry := cacheEntry{
 		prompt:    prompt,
@@ -155,7 +155,7 @@ func (c *semanticCache) set(ctx context.Context, prompt, response string) {
 	}(prompt, now)
 }
 
-func (c *semanticCache) size() int {
+func (c *SemanticCache) Size() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.entries)
@@ -164,7 +164,7 @@ func (c *semanticCache) size() int {
 // prune removes expired entries. Must be called with lock held.
 // Zeros the tail so GC can collect strings and embedding slices in
 // pruned entries (filter-in-place otherwise keeps them reachable).
-func (c *semanticCache) prune() {
+func (c *SemanticCache) prune() {
 	now := time.Now()
 	live := c.entries[:0]
 	for _, e := range c.entries {

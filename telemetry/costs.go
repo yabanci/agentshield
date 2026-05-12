@@ -2,7 +2,7 @@
 //
 // Prices are estimates for cloud-hosted Llama-class models (USD per 1M tokens).
 // The value is in the RELATIVE comparison: cache saves X, fallback saves Y.
-package agent
+package telemetry
 
 import (
 	"sync/atomic"
@@ -37,10 +37,10 @@ type CostTracker struct {
 	deniedReqs   atomic.Int64
 }
 
-func newCostTracker() *CostTracker { return &CostTracker{} }
+func NewCostTracker() *CostTracker { return &CostTracker{} }
 
 // NewTestCostTracker creates a CostTracker for use in tests.
-func NewTestCostTracker() *CostTracker { return newCostTracker() }
+func NewTestCostTracker() *CostTracker { return NewCostTracker() }
 
 // Record registers a completed request for cost tracking.
 //

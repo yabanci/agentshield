@@ -1,14 +1,14 @@
-package agent_test
+package quality_test
 
 import (
 	"testing"
 	"time"
 
-	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/quality"
 )
 
 func TestAdaptive_UncalibratedUsesDefaults(t *testing.T) {
-	sb := agent.NewSemanticBreaker(agent.DefaultSBConfig)
+	sb := quality.NewSemanticBreaker(quality.DefaultSBConfig)
 	snap := sb.Snapshot()
 	if snap.Calibration.Calibrated {
 		t.Error("breaker should not be calibrated before collecting enough samples")
@@ -19,7 +19,7 @@ func TestAdaptive_UncalibratedUsesDefaults(t *testing.T) {
 }
 
 func TestAdaptive_CalibratesAfterNSamples(t *testing.T) {
-	cfg := agent.SemanticBreakerConfig{
+	cfg := quality.SemanticBreakerConfig{
 		WindowSize:        6,
 		MinSamples:        2,
 		DegradedThreshold: 0.65,
@@ -27,11 +27,11 @@ func TestAdaptive_CalibratesAfterNSamples(t *testing.T) {
 		OpenTimeout:       30 * time.Second,
 		RecoverySamples:   2,
 	}
-	sb := agent.NewSemanticBreakerWithCalibN(cfg, 5)
+	sb := quality.NewSemanticBreakerWithCalibN(cfg, 5)
 
 	// Record 5 good scores — should trigger calibration
 	for i := 0; i < 5; i++ {
-		sb.Record(0.92, agent.QualityResult{Score: 0.92})
+		sb.Record(0.92, quality.QualityResult{Score: 0.92})
 	}
 
 	snap := sb.Snapshot()
@@ -52,13 +52,13 @@ func TestAdaptive_CalibratesAfterNSamples(t *testing.T) {
 }
 
 func TestAdaptive_TighterThresholdsForHighQualityModel(t *testing.T) {
-	cfg := agent.DefaultSBConfig
-	sb := agent.NewSemanticBreakerWithCalibN(cfg, 10)
+	cfg := quality.DefaultSBConfig
+	sb := quality.NewSemanticBreakerWithCalibN(cfg, 10)
 
 	// Simulate a model that consistently scores 0.95 ± 0.03
 	scores := []float64{0.95, 0.93, 0.97, 0.94, 0.96, 0.95, 0.92, 0.97, 0.94, 0.96}
 	for _, s := range scores {
-		sb.Record(s, agent.QualityResult{Score: s})
+		sb.Record(s, quality.QualityResult{Score: s})
 	}
 
 	snap := sb.Snapshot()
@@ -75,12 +75,12 @@ func TestAdaptive_TighterThresholdsForHighQualityModel(t *testing.T) {
 }
 
 func TestAdaptive_DriftDetected(t *testing.T) {
-	cfg := agent.DefaultSBConfig
-	sb := agent.NewSemanticBreakerWithCalibN(cfg, 5)
+	cfg := quality.DefaultSBConfig
+	sb := quality.NewSemanticBreakerWithCalibN(cfg, 5)
 
 	// Calibrate with a high baseline (mean ~0.92).
 	for i := 0; i < 5; i++ {
-		sb.Record(0.92, agent.QualityResult{Score: 0.92})
+		sb.Record(0.92, quality.QualityResult{Score: 0.92})
 	}
 	snap := sb.Snapshot()
 	if !snap.Calibration.Calibrated {
@@ -92,7 +92,7 @@ func TestAdaptive_DriftDetected(t *testing.T) {
 
 	// Feed 30+ post-calibration samples that drift down sharply (mean ~0.50).
 	for i := 0; i < 35; i++ {
-		sb.Record(0.50, agent.QualityResult{Score: 0.50})
+		sb.Record(0.50, quality.QualityResult{Score: 0.50})
 	}
 	snap = sb.Snapshot()
 	if !snap.Calibration.Drift {
@@ -102,15 +102,15 @@ func TestAdaptive_DriftDetected(t *testing.T) {
 }
 
 func TestAdaptive_NoDriftWithinTolerance(t *testing.T) {
-	cfg := agent.DefaultSBConfig
-	sb := agent.NewSemanticBreakerWithCalibN(cfg, 5)
+	cfg := quality.DefaultSBConfig
+	sb := quality.NewSemanticBreakerWithCalibN(cfg, 5)
 
 	for i := 0; i < 5; i++ {
-		sb.Record(0.85, agent.QualityResult{Score: 0.85})
+		sb.Record(0.85, quality.QualityResult{Score: 0.85})
 	}
 	// Post-calibration samples within ±0.10 of baseline — no drift.
 	for i := 0; i < 35; i++ {
-		sb.Record(0.80, agent.QualityResult{Score: 0.80})
+		sb.Record(0.80, quality.QualityResult{Score: 0.80})
 	}
 	snap := sb.Snapshot()
 	if snap.Calibration.Drift {
@@ -120,10 +120,10 @@ func TestAdaptive_NoDriftWithinTolerance(t *testing.T) {
 }
 
 func TestAdaptive_SamplesCountedCorrectly(t *testing.T) {
-	sb := agent.NewSemanticBreakerWithCalibN(agent.DefaultSBConfig, 8)
+	sb := quality.NewSemanticBreakerWithCalibN(quality.DefaultSBConfig, 8)
 
 	for i := 0; i < 5; i++ {
-		sb.Record(0.85, agent.QualityResult{Score: 0.85})
+		sb.Record(0.85, quality.QualityResult{Score: 0.85})
 	}
 
 	snap := sb.Snapshot()

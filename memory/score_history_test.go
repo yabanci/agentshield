@@ -1,15 +1,15 @@
-package agent_test
+package memory_test
 
 import (
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/memory"
 )
 
 func TestScoreHistory_EmptyReturnsEmptySlice(t *testing.T) {
-	h := agent.NewTestScoreHistory(10)
+	h := memory.NewTestScoreHistory(10)
 	pts := h.Snapshot()
 	if pts == nil {
 		t.Fatal("snapshot should never be nil")
@@ -20,7 +20,7 @@ func TestScoreHistory_EmptyReturnsEmptySlice(t *testing.T) {
 }
 
 func TestScoreHistory_RecordsInOrder(t *testing.T) {
-	h := agent.NewTestScoreHistoryFast(10) // no throttle for tests
+	h := memory.NewTestScoreHistoryFast(10) // no throttle for tests
 	h.Record(50)
 	h.Record(60)
 	h.Record(70)
@@ -35,7 +35,7 @@ func TestScoreHistory_RecordsInOrder(t *testing.T) {
 }
 
 func TestScoreHistory_RingBufferWrap(t *testing.T) {
-	h := agent.NewTestScoreHistoryFast(3)
+	h := memory.NewTestScoreHistoryFast(3)
 	h.Record(10)
 	h.Record(20)
 	h.Record(30)
@@ -55,7 +55,7 @@ func TestScoreHistory_RingBufferWrap(t *testing.T) {
 }
 
 func TestScoreHistory_TimestampMonotonic(t *testing.T) {
-	h := agent.NewTestScoreHistoryFast(10)
+	h := memory.NewTestScoreHistoryFast(10)
 	h.Record(50)
 	h.Record(60)
 	h.Record(70)
@@ -69,7 +69,7 @@ func TestScoreHistory_TimestampMonotonic(t *testing.T) {
 }
 
 func TestScoreHistory_ThrottlesWritesByDefault(t *testing.T) {
-	h := agent.NewTestScoreHistory(10) // production throttle: 1s
+	h := memory.NewTestScoreHistory(10) // production throttle: 1s
 	h.Record(50)
 	h.Record(60) // should be throttled — too soon
 	h.Record(70) // also throttled
@@ -81,7 +81,7 @@ func TestScoreHistory_ThrottlesWritesByDefault(t *testing.T) {
 }
 
 func TestScoreHistory_ConcurrentWrites(t *testing.T) {
-	h := agent.NewTestScoreHistoryFast(100)
+	h := memory.NewTestScoreHistoryFast(100)
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
@@ -104,7 +104,7 @@ func TestScoreHistory_ZeroCapacityIsSafe(t *testing.T) {
 			t.Errorf("zero-capacity should not panic, got: %v", r)
 		}
 	}()
-	h := agent.NewTestScoreHistoryFast(0)
+	h := memory.NewTestScoreHistoryFast(0)
 	// Recording on zero-capacity should not panic; snapshot should be empty.
 	_ = h
 	// Skipping Record() — division-by-zero behaviour is unspecified for cap=0.
@@ -112,7 +112,7 @@ func TestScoreHistory_ZeroCapacityIsSafe(t *testing.T) {
 
 // Verify the ring buffer ages out OLDEST entries when wrapping with throttle off.
 func TestScoreHistory_OrdersByTimestamp(t *testing.T) {
-	h := agent.NewTestScoreHistoryFast(5)
+	h := memory.NewTestScoreHistoryFast(5)
 	for i := 1; i <= 10; i++ {
 		h.Record(i)
 	}

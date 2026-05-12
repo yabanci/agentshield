@@ -1,14 +1,14 @@
-package agent_test
+package telemetry_test
 
 import (
 	"testing"
 
-	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/telemetry"
 )
 
 func TestCostTracker_RecordsPrimaryTokens(t *testing.T) {
-	ct := agent.NewTestCostTracker()
-	ct.Record(agent.TierPrimary, "prompt", "Hello world this is a response")
+	ct := telemetry.NewTestCostTracker()
+	ct.Record(telemetry.TierPrimary, "prompt", "Hello world this is a response")
 
 	s := ct.Snapshot()
 	if s.PrimaryTokens == 0 {
@@ -20,8 +20,8 @@ func TestCostTracker_RecordsPrimaryTokens(t *testing.T) {
 }
 
 func TestCostTracker_CacheIsFree(t *testing.T) {
-	ct := agent.NewTestCostTracker()
-	ct.Record(agent.TierCache, "prompt", "cached response text here")
+	ct := telemetry.NewTestCostTracker()
+	ct.Record(telemetry.TierCache, "prompt", "cached response text here")
 
 	s := ct.Snapshot()
 	if s.SpentPrimary != 0 || s.SpentFallback != 0 {
@@ -36,12 +36,12 @@ func TestCostTracker_CacheIsFree(t *testing.T) {
 }
 
 func TestCostTracker_FallbackCheaperThanPrimary(t *testing.T) {
-	ct := agent.NewTestCostTracker()
+	ct := telemetry.NewTestCostTracker()
 	text := "this is a typical response of reasonable length for testing"
 
 	// Record same text through both tiers
-	ct.Record(agent.TierPrimary, "prompt", text)
-	ct.Record(agent.TierFallback, "prompt", text)
+	ct.Record(telemetry.TierPrimary, "prompt", text)
+	ct.Record(telemetry.TierFallback, "prompt", text)
 
 	s := ct.Snapshot()
 	if s.SpentFallback >= s.SpentPrimary {
@@ -51,15 +51,15 @@ func TestCostTracker_FallbackCheaperThanPrimary(t *testing.T) {
 }
 
 func TestCostTracker_SavingsPercentIncreases(t *testing.T) {
-	ct := agent.NewTestCostTracker()
+	ct := telemetry.NewTestCostTracker()
 	text := "response text for cost testing purposes here"
 
-	ct.Record(agent.TierPrimary, "prompt", text)
+	ct.Record(telemetry.TierPrimary, "prompt", text)
 	s1 := ct.Snapshot()
 
 	// Add cache hits — savings should increase
-	ct.Record(agent.TierCache, "prompt", text)
-	ct.Record(agent.TierCache, "prompt", text)
+	ct.Record(telemetry.TierCache, "prompt", text)
+	ct.Record(telemetry.TierCache, "prompt", text)
 	s2 := ct.Snapshot()
 
 	if s2.SavingsPercent <= s1.SavingsPercent {
@@ -69,12 +69,12 @@ func TestCostTracker_SavingsPercentIncreases(t *testing.T) {
 }
 
 func TestCostTracker_TierCounts(t *testing.T) {
-	ct := agent.NewTestCostTracker()
-	ct.Record(agent.TierPrimary, "prompt", "a")
-	ct.Record(agent.TierPrimary, "prompt", "b")
-	ct.Record(agent.TierFallback, "prompt", "c")
-	ct.Record(agent.TierCache, "prompt", "d")
-	ct.Record(agent.TierDegraded, "prompt", "")
+	ct := telemetry.NewTestCostTracker()
+	ct.Record(telemetry.TierPrimary, "prompt", "a")
+	ct.Record(telemetry.TierPrimary, "prompt", "b")
+	ct.Record(telemetry.TierFallback, "prompt", "c")
+	ct.Record(telemetry.TierCache, "prompt", "d")
+	ct.Record(telemetry.TierDegraded, "prompt", "")
 
 	pr, fr, cr, dr := ct.TierCounts()
 	if pr != 2 { t.Errorf("expected 2 primary, got %d", pr) }

@@ -1,4 +1,4 @@
-package agent_test
+package cache_test
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/cache"
 )
 
 func TestCache_SetReturnsImmediately(t *testing.T) {
@@ -15,7 +15,7 @@ func TestCache_SetReturnsImmediately(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 		return []float64{1, 0, 0}, nil
 	}
-	c := agent.NewTestSemanticCache(time.Minute, slow)
+	c := cache.NewTestSemanticCache(time.Minute, slow)
 
 	start := time.Now()
 	c.SetForTest(context.Background(), "hello", "world")
@@ -33,7 +33,7 @@ func TestCache_AsyncEmbeddingEventuallyAttached(t *testing.T) {
 		called.Store(true)
 		return []float64{1, 0, 0}, nil
 	}
-	c := agent.NewTestSemanticCache(time.Minute, embedder)
+	c := cache.NewTestSemanticCache(time.Minute, embedder)
 	c.SetForTest(context.Background(), "hello", "world")
 
 	// Wait up to 1s for the goroutine to run.
@@ -55,7 +55,7 @@ func TestCache_ExactMatchWorksImmediately(t *testing.T) {
 		time.Sleep(500 * time.Millisecond) // slow
 		return []float64{1, 0, 0}, nil
 	}
-	c := agent.NewTestSemanticCache(time.Minute, embedder)
+	c := cache.NewTestSemanticCache(time.Minute, embedder)
 	c.SetForTest(context.Background(), "hello", "world")
 
 	// Immediately: exact match should still find it (semantic match would skip
@@ -70,7 +70,7 @@ func TestCache_ExactMatchWorksImmediately(t *testing.T) {
 }
 
 func TestCache_PruneFreesMemory(t *testing.T) {
-	c := agent.NewTestSemanticCache(time.Millisecond, nil) // 1ms TTL — instant expiry
+	c := cache.NewTestSemanticCache(time.Millisecond, nil) // 1ms TTL — instant expiry
 	c.SetForTest(context.Background(), "a", "1")
 	c.SetForTest(context.Background(), "b", "2")
 	time.Sleep(10 * time.Millisecond) // let entries expire

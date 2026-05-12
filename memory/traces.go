@@ -1,5 +1,5 @@
 // trace.go — per-request resilience trace.
-package agent
+package memory
 
 import (
 	"crypto/rand"
@@ -56,13 +56,13 @@ func newTrace(prompt string) *Trace {
 	}
 }
 
-func (t *Trace) addStep(step TraceStep) {
+func (t *Trace) AddStep(step TraceStep) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.Steps = append(t.Steps, step)
 }
 
-func (t *Trace) finalize(tier Tier) {
+func (t *Trace) Finalize(tier Tier) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.FinalTier = tier
@@ -78,7 +78,7 @@ type TraceStore struct {
 	done   chan struct{}
 }
 
-func newTraceStore() *TraceStore {
+func NewTraceStore() *TraceStore {
 	s := &TraceStore{
 		traces: make(map[string]*Trace),
 		ttl:    30 * time.Minute,
@@ -88,8 +88,8 @@ func newTraceStore() *TraceStore {
 	return s
 }
 
-// newTestTraceStore creates a TraceStore without the background cleanup goroutine.
-func newTestTraceStore() *TraceStore {
+// NewTestTraceStore creates a TraceStore without the background cleanup goroutine.
+func NewTestTraceStore() *TraceStore {
 	return &TraceStore{
 		traces: make(map[string]*Trace),
 		ttl:    30 * time.Minute,

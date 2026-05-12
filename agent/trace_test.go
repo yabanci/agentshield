@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/memory"
 )
 
 func TestTrace_CreatedOnAsk(t *testing.T) {
@@ -50,7 +51,7 @@ func TestTrace_StepsRecordOutcomes(t *testing.T) {
 	// Should have primary step with success outcome
 	found := false
 	for _, step := range tr.Steps {
-		if step.Tier == agent.TierPrimary && step.Outcome == agent.OutcomeSuccess {
+		if step.Tier == memory.TierPrimary && step.Outcome == memory.OutcomeSuccess {
 			found = true
 			if step.LatencyMS < 0 {
 				t.Error("step latency should be >= 0")
@@ -77,10 +78,10 @@ func TestTrace_FallbackStepRecordedOnTransportFailure(t *testing.T) {
 	hasPrimaryFail := false
 	hasFallbackSuccess := false
 	for _, step := range tr.Steps {
-		if step.Tier == agent.TierPrimary && step.Outcome == agent.OutcomeTransportError {
+		if step.Tier == memory.TierPrimary && step.Outcome == memory.OutcomeTransportError {
 			hasPrimaryFail = true
 		}
-		if step.Tier == agent.TierFallback && step.Outcome == agent.OutcomeSuccess {
+		if step.Tier == memory.TierFallback && step.Outcome == memory.OutcomeSuccess {
 			hasFallbackSuccess = true
 		}
 	}
@@ -108,7 +109,7 @@ func TestTrace_SemanticFailureRecorded(t *testing.T) {
 	// There should be a primary step with quality info
 	hasPrimaryWithQuality := false
 	for _, step := range tr.Steps {
-		if step.Tier == agent.TierPrimary && step.QualityScore != nil {
+		if step.Tier == memory.TierPrimary && step.QualityScore != nil {
 			hasPrimaryWithQuality = true
 			if *step.QualityScore > 0.45 {
 				t.Errorf("degraded response quality should be <= 0.45, got %.2f", *step.QualityScore)

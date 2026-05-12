@@ -1,14 +1,14 @@
-package agent_test
+package quality_test
 
 import (
 	"context"
 	"testing"
 
-	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/quality"
 )
 
-func newTestEvaluator() *agent.QualityEvaluator {
-	return agent.NewTestQualityEvaluator(nil) // no embedder in tests
+func newTestEvaluator() *quality.QualityEvaluator {
+	return quality.NewTestQualityEvaluator(nil) // no embedder in tests
 }
 
 func TestQuality_GoodResponse(t *testing.T) {
