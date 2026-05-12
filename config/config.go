@@ -12,11 +12,25 @@ type Config struct {
 	Port      string
 	AuthToken string
 	Logger    LoggerConfig
+	Provider  ProviderConfig
+	Models    ModelsConfig
 }
 
 type LoggerConfig struct {
 	Level  slog.Level
 	Format string // "text" | "json"
+}
+
+type ProviderConfig struct {
+	Kind    string
+	BaseURL string
+	Timeout time.Duration
+}
+
+type ModelsConfig struct {
+	Primary   string
+	Fallback  string
+	Embedding string
 }
 
 // Defaults returns a Config populated with safe production defaults.
@@ -28,8 +42,15 @@ func Defaults() *Config {
 			Level:  slog.LevelInfo,
 			Format: "text",
 		},
+		Provider: ProviderConfig{
+			Kind:    "ollama",
+			BaseURL: "http://localhost:11434",
+			Timeout: 60 * time.Second,
+		},
+		Models: ModelsConfig{
+			Primary:   "llama3.2",
+			Fallback:  "llama3.2:1b",
+			Embedding: "nomic-embed-text",
+		},
 	}
 }
-
-// Suppress unused-import warning until later tasks reference time.Duration fields.
-var _ = time.Second
