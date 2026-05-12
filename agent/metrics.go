@@ -24,15 +24,7 @@ var (
 		Help: "Circuit breaker state: 0=closed 1=half-open 2=open",
 	}, []string{"model"})
 
-	cacheSizeGauge = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "agentshield_cache_size",
-		Help: "Number of entries in the semantic cache",
-	})
-
-	cacheHitsTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "agentshield_cache_hits_total",
-		Help: "Semantic cache hits",
-	})
+	// cache metrics live in cache/metrics.go (cache owns its own observability)
 
 	loadshedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "agentshield_loadshed_total",

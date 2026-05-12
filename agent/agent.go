@@ -25,6 +25,7 @@ import (
 	"github.com/yabanci/flowguard/loadshed"
 	"github.com/yabanci/flowguard/retry"
 
+	"github.com/yabanci/agentshield/cache"
 	"github.com/yabanci/agentshield/config"
 	"github.com/yabanci/agentshield/provider"
 	"github.com/yabanci/agentshield/quality"
@@ -94,7 +95,7 @@ type Agent struct {
 	interactiveBH  *bulkhead.Bulkhead
 	batchBH        *bulkhead.Bulkhead
 	shedder        *loadshed.Shedder
-	cache          *semanticCache
+	cache          *cache.SemanticCache
 	tools          *ToolRegistry
 	sessions       *SessionStore
 	traces         *TraceStore
@@ -184,7 +185,7 @@ func newAgent(ollamaURL string) *Agent {
 	a.latency = newLatencyTracker()
 	a.scoreHistory = newScoreHistory(60)
 	a.qualityEval = quality.NewEvaluator(a.embedder.Embed)
-	a.cache = newSemanticCache(10*time.Minute, a.embedder.Embed)
+	a.cache = cache.New(10*time.Minute, a.embedder.Embed)
 	a.tools = newToolRegistry(a)
 	a.sessions = newSessionStore()
 	a.traces = newTraceStore()
@@ -211,7 +212,7 @@ func NewWithConfig(cfg *config.Config) *Agent {
 // NewWithOllamaURL creates an Agent for testing — no background cleanup goroutines.
 func NewWithOllamaURL(url string) *Agent {
 	a := newAgent(url)
-	a.cache = newSemanticCache(10*time.Minute, nil)
+	a.cache = cache.New(10*time.Minute, nil)
 	// Replace stores with test variants that don't start background goroutines.
 	a.traces = newTestTraceStore()
 	a.sessions = NewTestSessionStore()
@@ -328,7 +329,7 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 		requestsTotal.WithLabelValues("primary").Inc()
 		requestDuration.WithLabelValues("primary").Observe(dur.Seconds())
 		a.latency.Record(TierPrimary, dur)
-		a.cache.set(ctx, prompt, text)
+		a.cache.Set(ctx, prompt, text)
 		a.costs.Record(TierPrimary, prompt, text)
 		return Response{Text: text, Tier: TierPrimary}, nil
 	}
@@ -339,13 +340,13 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 		requestsTotal.WithLabelValues("fallback").Inc()
 		requestDuration.WithLabelValues("fallback").Observe(dur.Seconds())
 		a.latency.Record(TierFallback, dur)
-		a.cache.set(ctx, prompt, text)
+		a.cache.Set(ctx, prompt, text)
 		a.costs.Record(TierFallback, prompt, text)
 		return Response{Text: text, Tier: TierFallback}, nil
 	}
 
 	// Tier 3: semantic cache
-	if cached, ok := a.cache.get(ctx, prompt); ok {
+	if cached, ok := a.cache.Get(ctx, prompt); ok {
 		dur := time.Since(start)
 		requestsTotal.WithLabelValues("cache").Inc()
 		a.latency.Record(TierCache, dur)
@@ -636,7 +637,7 @@ func (a *Agent) Status() Status {
 		FallbackBreaker:    fallbackState,
 		PrimaryKilled:      a.primaryKilled.Load(),
 		FallbackKilled:     a.fallbackKilled.Load(),
-		CacheSize:          a.cache.size(),
+		CacheSize:          a.cache.Size(),
 		TotalRequests:      a.totalRequests.Load(),
 		ErrorRate:          a.primaryCB.ErrorRate(),
 		LoadshedLimit:      a.shedder.CurrentLimit(),
@@ -668,5 +669,5 @@ func (a *Agent) Ping(ctx context.Context) error {
 func (a *Agent) updateCBMetrics() {
 	cbStateGauge.WithLabelValues("primary").Set(cbStateValue(a.primaryCB.State().String()))
 	cbStateGauge.WithLabelValues("fallback").Set(cbStateValue(a.fallbackCB.State().String()))
-	cacheSizeGauge.Set(float64(a.cache.size()))
+	// cache size gauge is owned and updated by cache package internally.
 }
