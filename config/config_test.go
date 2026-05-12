@@ -64,3 +64,49 @@ func TestDefaults_Limits(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaults_QualityCacheWebhookScore(t *testing.T) {
+	c := Defaults()
+	if c.Quality.AcceptableScore != 0.45 {
+		t.Errorf("Quality.AcceptableScore = %v, want 0.45", c.Quality.AcceptableScore)
+	}
+	if c.Quality.DriftWindow != 50 {
+		t.Errorf("Quality.DriftWindow = %d, want 50", c.Quality.DriftWindow)
+	}
+	if c.Quality.DriftSigma != 2.0 {
+		t.Errorf("Quality.DriftSigma = %v, want 2.0", c.Quality.DriftSigma)
+	}
+	if c.Cache.TTL != 10*time.Minute {
+		t.Errorf("Cache.TTL = %v, want 10m", c.Cache.TTL)
+	}
+	if c.Cache.SimilarityThreshold != 0.92 {
+		t.Errorf("Cache.SimilarityThreshold = %v, want 0.92", c.Cache.SimilarityThreshold)
+	}
+	if c.Cache.MaxEntries != 1024 {
+		t.Errorf("Cache.MaxEntries = %d, want 1024", c.Cache.MaxEntries)
+	}
+	if !c.Cache.EmbedAsync {
+		t.Errorf("Cache.EmbedAsync = false, want true")
+	}
+	if c.Webhook.Timeout != 5*time.Second {
+		t.Errorf("Webhook.Timeout = %v, want 5s", c.Webhook.Timeout)
+	}
+	if c.Webhook.AllowHTTP {
+		t.Errorf("Webhook.AllowHTTP = true, want false")
+	}
+	if c.Webhook.AllowPrivate {
+		t.Errorf("Webhook.AllowPrivate = true, want false")
+	}
+	if c.Score.HistorySize != 60 {
+		t.Errorf("Score.HistorySize = %d, want 60", c.Score.HistorySize)
+	}
+	if c.Score.LatencyP95Target != 3*time.Second {
+		t.Errorf("Score.LatencyP95Target = %v, want 3s", c.Score.LatencyP95Target)
+	}
+	wantWeights := map[string]int{"transport": 20, "quality": 20, "cache": 20, "availability": 20, "latency": 20}
+	for k, v := range wantWeights {
+		if c.Score.Weights[k] != v {
+			t.Errorf("Score.Weights[%q] = %d, want %d", k, c.Score.Weights[k], v)
+		}
+	}
+}

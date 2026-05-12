@@ -15,6 +15,10 @@ type Config struct {
 	Provider  ProviderConfig
 	Models    ModelsConfig
 	Limits    LimitsConfig
+	Quality   QualityConfig
+	Cache     CacheConfig
+	Webhook   WebhookConfig
+	Score     ScoreConfig
 }
 
 type LoggerConfig struct {
@@ -49,6 +53,31 @@ type LimitsConfig struct {
 	RetryBaseBackoff    time.Duration
 }
 
+type QualityConfig struct {
+	AcceptableScore float64
+	DriftWindow     int
+	DriftSigma      float64
+}
+
+type CacheConfig struct {
+	TTL                 time.Duration
+	SimilarityThreshold float64
+	MaxEntries          int
+	EmbedAsync          bool
+}
+
+type WebhookConfig struct {
+	AllowHTTP    bool
+	AllowPrivate bool
+	Timeout      time.Duration
+}
+
+type ScoreConfig struct {
+	HistorySize      int
+	LatencyP95Target time.Duration
+	Weights          map[string]int
+}
+
 // Defaults returns a Config populated with safe production defaults.
 // Validate is NOT called here — caller must invoke Validate after merging env.
 func Defaults() *Config {
@@ -81,6 +110,31 @@ func Defaults() *Config {
 			HedgeDelay:          1500 * time.Millisecond,
 			RetryMax:            2,
 			RetryBaseBackoff:    300 * time.Millisecond,
+		},
+		Quality: QualityConfig{
+			AcceptableScore: 0.45,
+			DriftWindow:     50,
+			DriftSigma:      2.0,
+		},
+		Cache: CacheConfig{
+			TTL:                 10 * time.Minute,
+			SimilarityThreshold: 0.92,
+			MaxEntries:          1024,
+			EmbedAsync:          true,
+		},
+		Webhook: WebhookConfig{
+			Timeout: 5 * time.Second,
+		},
+		Score: ScoreConfig{
+			HistorySize:      60,
+			LatencyP95Target: 3 * time.Second,
+			Weights: map[string]int{
+				"transport":    20,
+				"quality":      20,
+				"cache":        20,
+				"availability": 20,
+				"latency":      20,
+			},
 		},
 	}
 }
