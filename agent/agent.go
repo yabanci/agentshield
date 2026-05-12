@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -24,7 +23,6 @@ import (
 	"github.com/yabanci/flowguard/circuitbreaker"
 	"github.com/yabanci/flowguard/hedge"
 	"github.com/yabanci/flowguard/loadshed"
-	"github.com/yabanci/flowguard/retry"
 
 	"github.com/yabanci/agentshield/cache"
 	"github.com/yabanci/agentshield/config"
@@ -93,8 +91,6 @@ type Agent struct {
 	fallback  provider.LLMProvider
 	embedder  provider.Embedder
 	breakers  *orchestrator.BreakerSet
-	qualityEval    *quality.QualityEvaluator
-	hedger         *hedge.Hedge
 	interactiveBH  *bulkhead.Bulkhead
 	batchBH        *bulkhead.Bulkhead
 	shedder        *loadshed.Shedder
@@ -103,6 +99,7 @@ type Agent struct {
 	memory         *memory.Store
 	telemetry      *telemetry.Store
 	chaos          *orchestrator.Chaos
+	orch           *orchestrator.Orchestrator
 	totalRequests  atomic.Int64
 }
 
@@ -130,9 +127,6 @@ func newAgent(ollamaURL string, log *slog.Logger) *Agent {
 		fallback:   ol,
 		embedder:   ol,
 		chaos: orchestrator.NewChaos(degraded),
-		// Hedge: if primary model hasn't responded in 1.5s, fire a duplicate.
-		// Returns whichever completes first.
-		hedger: hedge.New(1500*time.Millisecond, hedge.WithMaxHedges(1)),
 
 		// Bulkheads: limit concurrent requests per priority class.
 		interactiveBH: bulkhead.New(20, bulkhead.WithMaxWait(2*time.Second)),
@@ -185,9 +179,26 @@ func newAgent(ollamaURL string, log *slog.Logger) *Agent {
 	})
 	a.breakers = orchestrator.NewBreakerSet(pt, ft, ps, fs)
 
-	a.qualityEval = quality.NewEvaluator(a.embedder.Embed)
+	eval := quality.NewEvaluator(a.embedder.Embed)
 	a.cache = cache.New(10*time.Minute, a.embedder.Embed)
 	a.tools = newToolRegistry(a)
+
+	// Hedge: if primary model hasn't responded in 1.5s, fire a duplicate.
+	hedger := hedge.New(1500*time.Millisecond, hedge.WithMaxHedges(1))
+
+	a.orch = orchestrator.New(orchestrator.Config{
+		Log:           log,
+		Primary:       a.primary,
+		Fallback:      a.fallback,
+		PrimaryModel:  ModelPrimary,
+		FallbackModel: ModelFallback,
+		Breakers:      a.breakers,
+		Hedger:        hedger,
+		Eval:          eval,
+		Cache:         a.cache,
+		Telemetry:     a.telemetry,
+		Chaos:         a.chaos,
+	})
 	return a
 }
 
@@ -319,282 +330,21 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 	return resp, nil
 }
 
-// degrade runs the 4-tier degradation chain, recording each attempt in tr.
+// degrade delegates to Orchestrator. Kept as a method on Agent so react.go
+// can call it without taking an Orchestrator parameter.
 func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (Response, error) {
-	start := time.Now()
-	reqLog := a.log.With(slog.String(logkeys.TraceID, tr.ID))
-
-	// Tier 1: primary model (hedged + transport CB + semantic CB + retry)
-	if text, ok := a.tryPrimary(ctx, prompt, tr); ok {
-		dur := time.Since(start)
-		telemetry.RequestsTotal.WithLabelValues("primary").Inc()
-		telemetry.RequestDuration.WithLabelValues("primary").Observe(dur.Seconds())
-		a.telemetry.Latency.Record(TierPrimary, dur)
-		a.cache.Set(ctx, prompt, text)
-		a.telemetry.Costs.Record(TierPrimary, prompt, text)
-		reqLog.Info("tier served",
-			slog.String(logkeys.Tier, string(TierPrimary)),
-			slog.String(logkeys.Outcome, "success"),
-			slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
-		)
-		return Response{Text: text, Tier: TierPrimary}, nil
-	}
-
-	// Tier 2: fallback model (transport CB + semantic CB)
-	if text, ok := a.tryFallback(ctx, prompt, tr); ok {
-		dur := time.Since(start)
-		telemetry.RequestsTotal.WithLabelValues("fallback").Inc()
-		telemetry.RequestDuration.WithLabelValues("fallback").Observe(dur.Seconds())
-		a.telemetry.Latency.Record(TierFallback, dur)
-		a.cache.Set(ctx, prompt, text)
-		a.telemetry.Costs.Record(TierFallback, prompt, text)
-		reqLog.Warn("tier served via fallback",
-			slog.String(logkeys.Tier, string(TierFallback)),
-			slog.String(logkeys.Outcome, "success"),
-			slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
-		)
-		return Response{Text: text, Tier: TierFallback}, nil
-	}
-
-	// Tier 3: semantic cache
-	if cached, ok := a.cache.Get(ctx, prompt); ok {
-		dur := time.Since(start)
-		telemetry.RequestsTotal.WithLabelValues("cache").Inc()
-		a.telemetry.Latency.Record(TierCache, dur)
-		tr.AddStep(memory.TraceStep{Tier: TierCache, Outcome: memory.OutcomeCacheHit,
-			LatencyMS: dur.Milliseconds()})
-		a.telemetry.Costs.Record(TierCache, prompt, cached)
-		reqLog.Warn("tier served from semantic cache",
-			slog.String(logkeys.Tier, string(TierCache)),
-			slog.String(logkeys.Outcome, "cache_hit"),
-			slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
-		)
-		return Response{Text: cached, Tier: TierCache, Cached: true}, nil
-	}
-
-	// Tier 4: graceful denial
-	telemetry.RequestsTotal.WithLabelValues("degraded").Inc()
-	tr.AddStep(memory.TraceStep{Tier: TierDegraded, Outcome: memory.OutcomeGracefulDenial,
-		LatencyMS: time.Since(start).Milliseconds()})
-	a.telemetry.Costs.Record(TierDegraded, prompt, "")
-	reqLog.Error("all tiers exhausted — graceful denial",
-		slog.String(logkeys.Tier, string(TierDegraded)),
-		slog.String(logkeys.Outcome, "graceful_denial"),
-		slog.Int64(logkeys.LatencyMS, time.Since(start).Milliseconds()),
-	)
-	return Response{
-		Text: "All AI tiers are currently unavailable. Please try again shortly.",
-		Tier: TierDegraded,
-	}, nil
+	r := a.orch.Degrade(ctx, prompt, tr)
+	return Response{Text: r.Text, Tier: r.Tier, Cached: r.Cached}, nil
 }
 
-// tryPrimary uses hedge + transport CB + semantic CB + retry.
-//
-// Key design: quality evaluation is OUTSIDE the transport CB so that
-// semantic failures never pollute the transport circuit breaker's state.
-// The two breakers are fully independent.
-func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *memory.Trace) (string, bool) {
-	stepStart := time.Now()
-	step := memory.TraceStep{
-		Tier:        TierPrimary,
-		TransportCB: a.breakers.PrimaryTransport.State().String(),
-		SemanticCB:  string(a.breakers.PrimarySemantic.State()),
-	}
-	defer func() {
-		step.LatencyMS = time.Since(stepStart).Milliseconds()
-		tr.AddStep(step)
-	}()
+// StreamToken is re-exported from the orchestrator so existing handlers
+// (api/handler.go) keep working without an import switch.
+type StreamToken = orchestrator.StreamToken
 
-	if a.chaos.IsPrimaryKilled() {
-		step.Outcome = memory.OutcomeKilled
-		return "", false
-	}
-	if a.breakers.PrimarySemantic.ShouldBlock() {
-		step.Outcome = memory.OutcomeSemanticCBOpen
-		return "", false
-	}
-
-	var result string
-	hedgeFireCount := 0
-
-	transportErr := a.breakers.PrimaryTransport.Do(ctx, func(ctx context.Context) error {
-		return a.hedger.Do(ctx, func(ctx context.Context) error {
-			hedgeFireCount++
-			if hedgeFireCount > 1 {
-				telemetry.HedgeFiresTotal.Inc()
-			}
-			r := retry.New(
-				retry.WithMaxRetries(2),
-				retry.WithExponentialBackoff(300*time.Millisecond),
-			)
-			return r.Do(ctx, func(ctx context.Context) error {
-				text, err := a.generate(ctx, ModelPrimary, prompt)
-				if err != nil {
-					return err
-				}
-				result = text
-				return nil
-			})
-		})
-	})
-
-	if transportErr != nil {
-		step.Outcome = memory.OutcomeTransportError
-		step.TransportCB = a.breakers.PrimaryTransport.State().String()
-		return "", false
-	}
-
-	qr := a.qualityEval.Evaluate(ctx, prompt, result)
-	a.breakers.PrimarySemantic.Record(qr.Score, qr)
-	telemetry.QualityGauge.WithLabelValues("primary").Set(qr.Score)
-
-	step.QualityScore = &qr.Score
-	step.SemanticCB = string(a.breakers.PrimarySemantic.State())
-	if len(qr.Signals) > 0 {
-		names := make([]string, len(qr.Signals))
-		for i, s := range qr.Signals {
-			names[i] = s.Name
-		}
-		step.QualitySignals = names
-	}
-
-	if qr.Score < quality.QualityAcceptable && len(qr.Signals) > 0 {
-		step.Outcome = memory.OutcomeSemanticFailure
-		return "", false
-	}
-	step.Outcome = memory.OutcomeSuccess
-	return result, true
-}
-
-// tryFallback uses transport CB + semantic CB (no hedge — fallback must be fast).
-func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *memory.Trace) (string, bool) {
-	stepStart := time.Now()
-	step := memory.TraceStep{
-		Tier:        TierFallback,
-		TransportCB: a.breakers.FallbackTransport.State().String(),
-		SemanticCB:  string(a.breakers.FallbackSemantic.State()),
-	}
-	defer func() {
-		step.LatencyMS = time.Since(stepStart).Milliseconds()
-		tr.AddStep(step)
-	}()
-
-	if a.chaos.IsFallbackKilled() {
-		step.Outcome = memory.OutcomeKilled
-		return "", false
-	}
-	if a.breakers.FallbackSemantic.ShouldBlock() {
-		step.Outcome = memory.OutcomeSemanticCBOpen
-		return "", false
-	}
-
-	var result string
-	err := a.breakers.FallbackTransport.Do(ctx, func(ctx context.Context) error {
-		r, err := a.fallback.Generate(ctx, provider.Request{Model: ModelFallback, Prompt: prompt})
-		text := r.Text
-		if err != nil {
-			return err
-		}
-		qr := a.qualityEval.Evaluate(ctx, prompt, text)
-		a.breakers.FallbackSemantic.Record(qr.Score, qr)
-		telemetry.QualityGauge.WithLabelValues("fallback").Set(qr.Score)
-		step.QualityScore = &qr.Score
-		step.SemanticCB = string(a.breakers.FallbackSemantic.State())
-		result = text
-		return nil
-	})
-	if err != nil {
-		step.Outcome = memory.OutcomeTransportError
-		return "", false
-	}
-	step.Outcome = memory.OutcomeSuccess
-	return result, true
-}
-
-// generate calls the primary provider. Degrade injection is handled inside
-// the DegradedWrapper decorator (provider/degraded.go) — no branch here.
-func (a *Agent) generate(ctx context.Context, model, prompt string) (string, error) {
-	r, err := a.primary.Generate(ctx, provider.Request{Model: model, Prompt: prompt})
-	if err != nil {
-		return "", err
-	}
-	return r.Text, nil
-}
-
-// StreamToken is a single event in the quality-gated stream.
-type StreamToken struct {
-	Token    string `json:"token,omitempty"`
-	Done     bool   `json:"done,omitempty"`
-	Tier     Tier   `json:"tier"`
-	Switched bool   `json:"switched,omitempty"` // quality gate triggered mid-stream
-	Reason   string `json:"reason,omitempty"`
-}
-
-// StreamWithQualityGate streams tokens with an inline quality gate.
-// If hallucination markers are detected in the first 120 tokens,
-// the stream aborts and automatically continues from the fallback model.
-// The caller receives a StreamToken{Switched: true} event at the switch point.
+// StreamWithQualityGate delegates to Orchestrator. Returns memory.Tier
+// (which Tier aliases) so callers see no observable change.
 func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out chan<- StreamToken) (Tier, error) {
-	canUsePrimary := !a.chaos.IsPrimaryKilled() &&
-		!a.breakers.PrimarySemantic.ShouldBlock() &&
-		a.breakers.PrimaryTransport.State().String() == "closed"
-
-	if canUsePrimary {
-		// Use a cancellable child context so we can abort the primary stream
-		// when the quality gate trips without leaking the stream goroutine.
-		streamCtx, cancelStream := context.WithCancel(ctx)
-		rawTokens := make(chan string, 64)
-		// errCh creates a happens-before edge between the streamer goroutine
-		// finishing and the consumer reading streamErr. Without this, the race
-		// detector flags a read/write race on a plain `streamErr` variable.
-		errCh := make(chan error, 1)
-
-		// provider.LLMProvider.Stream owns closing rawTokens (per its contract).
-		go func() {
-			errCh <- a.primary.Stream(streamCtx, provider.Request{Model: ModelPrimary, Prompt: prompt}, rawTokens)
-		}()
-
-		var buf strings.Builder
-		tokenCount := 0
-		tripped := false
-
-		for token := range rawTokens {
-			buf.WriteString(token)
-			tokenCount++
-
-			// Quality gate: check every 30 tokens for hallucination markers.
-			if tokenCount%30 == 0 && tokenCount <= 120 {
-				hallScore, reason := quality.HallucinationScore(buf.String())
-				if hallScore < 0.5 {
-					tripped = true
-					cancelStream() // abort primary stream
-					for range rawTokens {
-					} // drain so goroutine can exit
-					out <- StreamToken{Switched: true, Tier: TierFallback,
-						Reason: "quality gate: " + reason}
-					break
-				}
-			}
-			out <- StreamToken{Token: token, Tier: TierPrimary}
-		}
-		cancelStream() // no-op if already cancelled; always call to free resources
-
-		streamErr := <-errCh
-		if !tripped && streamErr == nil {
-			return TierPrimary, nil
-		}
-	}
-
-	// Fallback stream (no quality gate — fallback must always complete).
-	// Provider closes rawTokens per LLMProvider contract.
-	rawTokens := make(chan string, 64)
-	go func() {
-		_ = a.fallback.Stream(ctx, provider.Request{Model: ModelFallback, Prompt: prompt}, rawTokens)
-	}()
-	for token := range rawTokens {
-		out <- StreamToken{Token: token, Tier: TierFallback}
-	}
-	return TierFallback, nil
+	return a.orch.StreamWithQualityGate(ctx, prompt, out)
 }
 
 // KillPrimary / RestorePrimary simulate primary model failures.
