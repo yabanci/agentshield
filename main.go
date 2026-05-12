@@ -25,7 +25,7 @@ func main() {
 
 	a := agent.NewWithConfig(cfg)
 	defer a.Stop()
-	h := api.New(a)
+	h := api.New(a, cfg)
 
 	mux := http.NewServeMux()
 	h.Register(mux)
