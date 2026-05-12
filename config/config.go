@@ -14,6 +14,7 @@ type Config struct {
 	Logger    LoggerConfig
 	Provider  ProviderConfig
 	Models    ModelsConfig
+	Limits    LimitsConfig
 }
 
 type LoggerConfig struct {
@@ -31,6 +32,21 @@ type ModelsConfig struct {
 	Primary   string
 	Fallback  string
 	Embedding string
+}
+
+type LimitsConfig struct {
+	MaxPromptBytes      int
+	ToolTimeout         time.Duration
+	InteractiveSlots    int
+	BatchSlots          int
+	LoadshedStart       int
+	LoadshedWindow      time.Duration
+	PrimaryCBWindow     int
+	PrimaryCBErrorRate  float64
+	FallbackCBThreshold int
+	HedgeDelay          time.Duration
+	RetryMax            int
+	RetryBaseBackoff    time.Duration
 }
 
 // Defaults returns a Config populated with safe production defaults.
@@ -51,6 +67,20 @@ func Defaults() *Config {
 			Primary:   "llama3.2",
 			Fallback:  "llama3.2:1b",
 			Embedding: "nomic-embed-text",
+		},
+		Limits: LimitsConfig{
+			MaxPromptBytes:      32 * 1024,
+			ToolTimeout:         10 * time.Second,
+			InteractiveSlots:    20,
+			BatchSlots:          5,
+			LoadshedStart:       50,
+			LoadshedWindow:      5 * time.Second,
+			PrimaryCBWindow:     20,
+			PrimaryCBErrorRate:  0.5,
+			FallbackCBThreshold: 3,
+			HedgeDelay:          1500 * time.Millisecond,
+			RetryMax:            2,
+			RetryBaseBackoff:    300 * time.Millisecond,
 		},
 	}
 }
