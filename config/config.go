@@ -78,6 +78,9 @@ type ScoreConfig struct {
 	Weights          map[string]int
 }
 
+// Validate returns nil for now; F1.6 fills in real checks.
+func (c *Config) Validate() error { return nil }
+
 // Defaults returns a Config populated with safe production defaults.
 // Validate is NOT called here — caller must invoke Validate after merging env.
 func Defaults() *Config {

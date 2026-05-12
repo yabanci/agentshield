@@ -110,3 +110,42 @@ func TestDefaults_QualityCacheWebhookScore(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadFromEnv_Overrides(t *testing.T) {
+	t.Setenv("PORT", "9090")
+	t.Setenv("OLLAMA_URL", "http://ollama.example:11434")
+	t.Setenv("AGENTSHIELD_AUTH_TOKEN", "secret-xyz")
+	t.Setenv("AGENTSHIELD_ALLOW_HTTP_WEBHOOK", "true")
+	t.Setenv("AGENTSHIELD_ALLOW_PRIVATE_WEBHOOK", "true")
+
+	c, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
+	}
+	if c.Port != "9090" {
+		t.Errorf("Port = %q, want 9090", c.Port)
+	}
+	if c.Provider.BaseURL != "http://ollama.example:11434" {
+		t.Errorf("Provider.BaseURL = %q, want http://ollama.example:11434", c.Provider.BaseURL)
+	}
+	if c.AuthToken != "secret-xyz" {
+		t.Errorf("AuthToken = %q, want secret-xyz", c.AuthToken)
+	}
+	if !c.Webhook.AllowHTTP {
+		t.Errorf("Webhook.AllowHTTP = false, want true")
+	}
+	if !c.Webhook.AllowPrivate {
+		t.Errorf("Webhook.AllowPrivate = false, want true")
+	}
+}
+
+func TestLoadFromEnv_NoOverridesUsesDefaults(t *testing.T) {
+	t.Setenv("PORT", "")
+	c, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
+	}
+	if c.Port != "8080" {
+		t.Errorf("Port = %q, want default 8080", c.Port)
+	}
+}
