@@ -187,7 +187,7 @@ type LimitsConfig struct {
 }
 
 type QualityConfig struct {
-    AcceptableScore float64           // default 0.5
+    AcceptableScore float64           // default 0.45 (current QualityAcceptable)
     Coherence       CoherenceConfig
     HallucPatterns  []string
     DriftWindow     int               // default 50
@@ -246,13 +246,13 @@ type Response struct {
 type LLMProvider interface {
     Generate(ctx context.Context, req Request) (Response, error)
     Stream(ctx context.Context, req Request, out chan<- string) error // provider closes `out`
-    Embed(ctx context.Context, text string) ([]float32, error)
+    Embed(ctx context.Context, text string) ([]float64, error)
     Ping(ctx context.Context) error
     Name() string
 }
 
 type Embedder interface {
-    Embed(ctx context.Context, text string) ([]float32, error)
+    Embed(ctx context.Context, text string) ([]float64, error)
 }
 ```
 
