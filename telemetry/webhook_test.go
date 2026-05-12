@@ -1,4 +1,4 @@
-package agent_test
+package telemetry_test
 
 import (
 	"encoding/json"
@@ -8,17 +8,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yabanci/agentshield/agent"
+	"github.com/yabanci/agentshield/telemetry"
 	"github.com/yabanci/agentshield/quality"
 )
 
 func TestWebhook_FiredOnSemanticCBStateChange(t *testing.T) {
 	var mu sync.Mutex
-	var received []agent.WebhookEvent
+	var received []telemetry.WebhookEvent
 
 	// Create a test webhook server
 	webhookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var ev agent.WebhookEvent
+		var ev telemetry.WebhookEvent
 		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
 			t.Errorf("failed to decode webhook event: %v", err)
 			return
@@ -40,12 +40,12 @@ func TestWebhook_FiredOnSemanticCBStateChange(t *testing.T) {
 		RecoverySamples:   2,
 	}
 
-	dispatcher := agent.NewTestWebhookDispatcher()
+	dispatcher := telemetry.NewTestWebhookDispatcher()
 	dispatcher.SetURL(webhookSrv.URL)
 
 	sb := quality.NewSemanticBreaker(cfg)
 	sb.WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
-		dispatcher.Fire(agent.WebhookEvent{
+		dispatcher.Fire(telemetry.WebhookEvent{
 			Event:      "semantic_cb_" + string(next),
 			Model:      "primary",
 			PrevState:  string(prev),
@@ -91,10 +91,10 @@ func TestWebhook_NoFireWhenURLNotSet(t *testing.T) {
 	}))
 	defer webhookSrv.Close()
 
-	dispatcher := agent.NewTestWebhookDispatcher()
+	dispatcher := telemetry.NewTestWebhookDispatcher()
 	// No URL set
 
-	dispatcher.Fire(agent.WebhookEvent{Event: "test"})
+	dispatcher.Fire(telemetry.WebhookEvent{Event: "test"})
 	time.Sleep(50 * time.Millisecond)
 
 	if fired {
@@ -103,7 +103,7 @@ func TestWebhook_NoFireWhenURLNotSet(t *testing.T) {
 }
 
 func TestWebhook_ConfigurableURL(t *testing.T) {
-	d := agent.NewTestWebhookDispatcher()
+	d := telemetry.NewTestWebhookDispatcher()
 	if d.URL() != "" {
 		t.Error("URL should be empty initially")
 	}

@@ -1,5 +1,5 @@
 // latency.go — rolling-window p95 latency tracker per tier.
-package agent
+package telemetry
 
 import (
 	"sort"
@@ -18,7 +18,7 @@ type LatencyTracker struct {
 	filled  map[Tier]bool
 }
 
-func newLatencyTracker() *LatencyTracker {
+func NewLatencyTracker() *LatencyTracker {
 	return &LatencyTracker{
 		windows: make(map[Tier][]time.Duration),
 		idx:     make(map[Tier]int),
@@ -27,7 +27,7 @@ func newLatencyTracker() *LatencyTracker {
 }
 
 // NewTestLatencyTracker creates a LatencyTracker for use in tests.
-func NewTestLatencyTracker() *LatencyTracker { return newLatencyTracker() }
+func NewTestLatencyTracker() *LatencyTracker { return NewLatencyTracker() }
 
 // Record adds a latency sample for the given tier.
 func (l *LatencyTracker) Record(tier Tier, d time.Duration) {

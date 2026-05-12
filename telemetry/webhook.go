@@ -1,5 +1,5 @@
 // webhook.go — fires HTTP notifications on circuit breaker state changes.
-package agent
+package telemetry
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ type WebhookDispatcher struct {
 	client *http.Client
 }
 
-func newWebhookDispatcher() *WebhookDispatcher {
+func NewWebhookDispatcher() *WebhookDispatcher {
 	return &WebhookDispatcher{
 		client: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -37,7 +37,7 @@ func newWebhookDispatcher() *WebhookDispatcher {
 
 // NewTestWebhookDispatcher creates a dispatcher for use in tests.
 func NewTestWebhookDispatcher() *WebhookDispatcher {
-	return newWebhookDispatcher()
+	return NewWebhookDispatcher()
 }
 
 func (w *WebhookDispatcher) SetURL(url string) {

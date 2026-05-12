@@ -29,6 +29,7 @@ import (
 	"github.com/yabanci/agentshield/config"
 	"github.com/yabanci/agentshield/provider"
 	"github.com/yabanci/agentshield/quality"
+	"github.com/yabanci/agentshield/telemetry"
 )
 
 const (
@@ -37,13 +38,14 @@ const (
 )
 
 // Tier describes which degradation level answered the request.
-type Tier string
+// Canonical type lives in telemetry — alias here so existing call sites work.
+type Tier = telemetry.Tier
 
 const (
-	TierPrimary  Tier = "primary"
-	TierFallback Tier = "fallback"
-	TierCache    Tier = "cache"
-	TierDegraded Tier = "degraded"
+	TierPrimary  = telemetry.TierPrimary
+	TierFallback = telemetry.TierFallback
+	TierCache    = telemetry.TierCache
+	TierDegraded = telemetry.TierDegraded
 )
 
 // Response is the result of a resilient LLM call.
@@ -72,10 +74,10 @@ type Status struct {
 	PrimarySemanticCB  quality.SBSnapshot         `json:"primary_semantic_cb"`
 	FallbackSemanticCB quality.SBSnapshot         `json:"fallback_semantic_cb"`
 	DegradeMode        bool               `json:"degrade_mode"`
-	Costs              CostStats          `json:"costs"`
-	TierCounts         TierRequestCounts  `json:"tier_counts"`
-	Latency            LatencySnapshot    `json:"latency"`
-	Score              ResilienceScore    `json:"score"`
+	Costs              telemetry.CostStats          `json:"costs"`
+	TierCounts         telemetry.TierRequestCounts  `json:"tier_counts"`
+	Latency            telemetry.LatencySnapshot    `json:"latency"`
+	Score              telemetry.ResilienceScore    `json:"score"`
 }
 
 // Agent is the resilient LLM client.
@@ -99,9 +101,9 @@ type Agent struct {
 	tools          *ToolRegistry
 	sessions       *SessionStore
 	traces         *TraceStore
-	webhook        *WebhookDispatcher
-	costs          *CostTracker
-	latency        *LatencyTracker
+	webhook        *telemetry.WebhookDispatcher
+	costs          *telemetry.CostTracker
+	latency        *telemetry.LatencyTracker
 	scoreHistory   *ScoreHistory
 	chaosMu        atomic.Bool
 	primaryKilled  atomic.Bool
@@ -147,11 +149,11 @@ func newAgent(ollamaURL string) *Agent {
 		// Loadshed: adaptive AIMD — starts at 50 concurrent, shrinks under load.
 		shedder: loadshed.New(50, 5*time.Second),
 	}
-	a.webhook = newWebhookDispatcher()
+	a.webhook = telemetry.NewWebhookDispatcher()
 
 	a.primarySemCB = quality.NewSemanticBreaker(quality.DefaultSBConfig).
 		WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
-			a.webhook.Fire(WebhookEvent{
+			a.webhook.Fire(telemetry.WebhookEvent{
 				Event:      fmt.Sprintf("semantic_cb_%s", next),
 				Model:      ModelPrimary,
 				PrevState:  string(prev),
@@ -170,7 +172,7 @@ func newAgent(ollamaURL string) *Agent {
 		OpenTimeout:       30 * time.Second,
 		RecoverySamples:   2,
 	}).WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
-		a.webhook.Fire(WebhookEvent{
+		a.webhook.Fire(telemetry.WebhookEvent{
 			Event:      fmt.Sprintf("semantic_cb_%s", next),
 			Model:      ModelFallback,
 			PrevState:  string(prev),
@@ -181,8 +183,8 @@ func newAgent(ollamaURL string) *Agent {
 		})
 	})
 
-	a.costs = newCostTracker()
-	a.latency = newLatencyTracker()
+	a.costs = telemetry.NewCostTracker()
+	a.latency = telemetry.NewLatencyTracker()
 	a.scoreHistory = newScoreHistory(60)
 	a.qualityEval = quality.NewEvaluator(a.embedder.Embed)
 	a.cache = cache.New(10*time.Minute, a.embedder.Embed)
@@ -295,12 +297,12 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 	})
 
 	if errors.Is(err, loadshed.ErrShed) {
-		loadshedTotal.Inc()
+		telemetry.LoadshedTotal.Inc()
 		resp = Response{Text: "Server is overloaded. Please try again in a moment.", Tier: TierDegraded}
 		tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial, LatencyMS: 0})
 		a.costs.Record(TierDegraded, prompt, "") // keep TierCounts in sync with TotalRequests
 	} else if errors.Is(err, bulkhead.ErrFull) {
-		bulkheadFullTotal.WithLabelValues(func() string {
+		telemetry.BulkheadFullTotal.WithLabelValues(func() string {
 			if batch {
 				return "batch"
 			}
@@ -326,8 +328,8 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 	// Tier 1: primary model (hedged + transport CB + semantic CB + retry)
 	if text, ok := a.tryPrimary(ctx, prompt, tr); ok {
 		dur := time.Since(start)
-		requestsTotal.WithLabelValues("primary").Inc()
-		requestDuration.WithLabelValues("primary").Observe(dur.Seconds())
+		telemetry.RequestsTotal.WithLabelValues("primary").Inc()
+		telemetry.RequestDuration.WithLabelValues("primary").Observe(dur.Seconds())
 		a.latency.Record(TierPrimary, dur)
 		a.cache.Set(ctx, prompt, text)
 		a.costs.Record(TierPrimary, prompt, text)
@@ -337,8 +339,8 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 	// Tier 2: fallback model (transport CB + semantic CB)
 	if text, ok := a.tryFallback(ctx, prompt, tr); ok {
 		dur := time.Since(start)
-		requestsTotal.WithLabelValues("fallback").Inc()
-		requestDuration.WithLabelValues("fallback").Observe(dur.Seconds())
+		telemetry.RequestsTotal.WithLabelValues("fallback").Inc()
+		telemetry.RequestDuration.WithLabelValues("fallback").Observe(dur.Seconds())
 		a.latency.Record(TierFallback, dur)
 		a.cache.Set(ctx, prompt, text)
 		a.costs.Record(TierFallback, prompt, text)
@@ -348,7 +350,7 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 	// Tier 3: semantic cache
 	if cached, ok := a.cache.Get(ctx, prompt); ok {
 		dur := time.Since(start)
-		requestsTotal.WithLabelValues("cache").Inc()
+		telemetry.RequestsTotal.WithLabelValues("cache").Inc()
 		a.latency.Record(TierCache, dur)
 		tr.addStep(TraceStep{Tier: TierCache, Outcome: OutcomeCacheHit,
 			LatencyMS: dur.Milliseconds()})
@@ -357,7 +359,7 @@ func (a *Agent) degrade(ctx context.Context, prompt string, tr *Trace) (Response
 	}
 
 	// Tier 4: graceful denial
-	requestsTotal.WithLabelValues("degraded").Inc()
+	telemetry.RequestsTotal.WithLabelValues("degraded").Inc()
 	tr.addStep(TraceStep{Tier: TierDegraded, Outcome: OutcomeGracefulDenial,
 		LatencyMS: time.Since(start).Milliseconds()})
 	a.costs.Record(TierDegraded, prompt, "")
@@ -400,7 +402,7 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *Trace) (strin
 		return a.hedger.Do(ctx, func(ctx context.Context) error {
 			hedgeFireCount++
 			if hedgeFireCount > 1 {
-				hedgeFiresTotal.Inc()
+				telemetry.HedgeFiresTotal.Inc()
 			}
 			r := retry.New(
 				retry.WithMaxRetries(2),
@@ -425,7 +427,7 @@ func (a *Agent) tryPrimary(ctx context.Context, prompt string, tr *Trace) (strin
 
 	qr := a.qualityEval.Evaluate(ctx, prompt, result)
 	a.primarySemCB.Record(qr.Score, qr)
-	qualityGauge.WithLabelValues("primary").Set(qr.Score)
+	telemetry.QualityGauge.WithLabelValues("primary").Set(qr.Score)
 
 	step.QualityScore = &qr.Score
 	step.SemanticCB = string(a.primarySemCB.State())
@@ -476,7 +478,7 @@ func (a *Agent) tryFallback(ctx context.Context, prompt string, tr *Trace) (stri
 		}
 		qr := a.qualityEval.Evaluate(ctx, prompt, text)
 		a.fallbackSemCB.Record(qr.Score, qr)
-		qualityGauge.WithLabelValues("fallback").Set(qr.Score)
+		telemetry.QualityGauge.WithLabelValues("fallback").Set(qr.Score)
 		step.QualityScore = &qr.Score
 		step.SemanticCB = string(a.fallbackSemCB.State())
 		result = text
@@ -624,11 +626,11 @@ func (a *Agent) Status() Status {
 	}
 	pSem := a.primarySemCB.Snapshot()
 	fSem := a.fallbackSemCB.Snapshot()
-	semanticCBStateGauge.WithLabelValues("primary").Set(sbStateValue(pSem.State))
-	semanticCBStateGauge.WithLabelValues("fallback").Set(sbStateValue(fSem.State))
+	telemetry.SemanticCBStateGauge.WithLabelValues("primary").Set(telemetry.SBStateValue(pSem.State))
+	telemetry.SemanticCBStateGauge.WithLabelValues("fallback").Set(telemetry.SBStateValue(fSem.State))
 
 	pr, fr, cr, dr := a.costs.TierCounts()
-	tierCounts := TierRequestCounts{Primary: pr, Fallback: fr, Cache: cr, Denied: dr}
+	tierCounts := telemetry.TierRequestCounts{Primary: pr, Fallback: fr, Cache: cr, Denied: dr}
 	costs := a.costs.Snapshot()
 	lat := a.latency.Snapshot()
 
@@ -653,7 +655,19 @@ func (a *Agent) Status() Status {
 		TierCounts:         tierCounts,
 		Latency:            lat,
 	}
-	s.Score = ComputeScore(s)
+	s.Score = telemetry.ComputeScore(telemetry.ScoreInput{
+		PrimaryBreaker:     s.PrimaryBreaker,
+		FallbackBreaker:    s.FallbackBreaker,
+		PrimaryKilled:      s.PrimaryKilled,
+		FallbackKilled:     s.FallbackKilled,
+		PrimarySemanticCB:  s.PrimarySemanticCB,
+		FallbackSemanticCB: s.FallbackSemanticCB,
+		DegradeMode:        s.DegradeMode,
+		CacheSize:          s.CacheSize,
+		TierCounts:         s.TierCounts,
+		Costs:              s.Costs,
+		Latency:            s.Latency,
+	})
 	a.scoreHistory.Record(s.Score.Total)
 	return s
 }
@@ -667,7 +681,7 @@ func (a *Agent) Ping(ctx context.Context) error {
 }
 
 func (a *Agent) updateCBMetrics() {
-	cbStateGauge.WithLabelValues("primary").Set(cbStateValue(a.primaryCB.State().String()))
-	cbStateGauge.WithLabelValues("fallback").Set(cbStateValue(a.fallbackCB.State().String()))
+	telemetry.CBStateGauge.WithLabelValues("primary").Set(telemetry.CBStateValue(a.primaryCB.State().String()))
+	telemetry.CBStateGauge.WithLabelValues("fallback").Set(telemetry.CBStateValue(a.fallbackCB.State().String()))
 	// cache size gauge is owned and updated by cache package internally.
 }

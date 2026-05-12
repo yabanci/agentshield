@@ -6,13 +6,29 @@
 //   Cache Efficiency  — how well is the cache absorbing traffic?
 //   Availability      — what % of requests get a real (non-denial) response?
 //   Latency           — are responses fast enough to be useful?
-package agent
+package telemetry
 
 import (
 	"fmt"
 
 	"github.com/yabanci/agentshield/quality"
 )
+
+// ScoreInput is the snapshot ComputeScore needs. It's a subset of agent.Status
+// without the import dependency on agent — resolves the agent ↔ telemetry cycle.
+type ScoreInput struct {
+	PrimaryBreaker     string             // "closed" | "open" | "half-open"
+	FallbackBreaker    string             // "closed" | "open" | "half-open"
+	PrimaryKilled      bool
+	FallbackKilled     bool
+	PrimarySemanticCB  quality.SBSnapshot
+	FallbackSemanticCB quality.SBSnapshot
+	DegradeMode        bool
+	CacheSize          int
+	TierCounts         TierRequestCounts
+	Costs              CostStats
+	Latency            LatencySnapshot
+}
 
 // ResilienceScore is the overall health of the agent's resilience stack.
 type ResilienceScore struct {
@@ -33,7 +49,7 @@ type ResilienceBreakdown struct {
 
 // ComputeScore calculates the resilience score from live status.
 // Each component is scored out of 20; total is 0–100.
-func ComputeScore(s Status) ResilienceScore {
+func ComputeScore(s ScoreInput) ResilienceScore {
 	b := ResilienceBreakdown{}
 
 	// ── Component 1: Transport Health (20 pts) ─────────────────────────────
@@ -156,7 +172,7 @@ func scoreGrade(score int) string {
 	}
 }
 
-func scoreRecommendation(b ResilienceBreakdown, s Status) string {
+func scoreRecommendation(b ResilienceBreakdown, s ScoreInput) string {
 	// Return the single most impactful recommendation.
 	if b.TransportHealth < 16 {
 		if s.PrimaryKilled {
