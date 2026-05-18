@@ -4,6 +4,19 @@
 
 **Production-grade resilience middleware for LLM agents — powered by [flowguard](https://github.com/yabanci/flowguard)**
 
+> 🎥 **Demo video**: _link goes here once recorded_
+> 🌐 **Live dashboard**: _link goes here once deployed_
+> 📸 _Dashboard screenshot / chaos-demo GIF goes here_
+
+---
+
+## TL;DR for judges in 30 seconds
+
+- **One unique idea**: a circuit breaker that opens on **LLM quality degradation** (looping, refusal-leak, off-topic), not on transport errors. No other resilience library catches an HTTP 200 with garbage. See [Semantic Circuit Breaker](#semantic-circuit-breaker).
+- **One demo button to click**: 🧪 **Enable Degrade** on the dashboard, then 🧪 **Run Compare** to see shielded vs raw side by side. The contrast is the value-prop.
+- **One env var for hosted backends**: `LLM_PROVIDER=openai` + `OPENAI_API_KEY` and the same resilience stack runs against OpenAI / Groq / OpenRouter / vLLM. See [Quick Start](#quick-start).
+- **It's a real codebase**: 12 domain packages, race-clean under `-race -count=10`, six rounds of multi-agent audit closed ~75 findings.
+
 ---
 
 ## The problem nobody else solves

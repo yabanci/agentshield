@@ -14,9 +14,14 @@
 ollama list
 # Expected: llama3.2, llama3.2:1b, nomic-embed-text — all present
 
-# 2. Clean build, no auth (judges should see open dashboard)
+# 2. Clean build. For LOCAL recording: leave AGENTSHIELD_AUTH_TOKEN unset
+#    so the dashboard is open. For a PUBLIC LIVE URL (Devpost link):
+#    SET a token — otherwise any visitor can POST /demo/kill and wedge
+#    the demo. Kill/Degrade actions auto-restore after 5 min as a safety
+#    net but a token is still the right answer for shared deployments.
 cd ~/Projects/pet/agentshield
-unset AGENTSHIELD_AUTH_TOKEN
+unset AGENTSHIELD_AUTH_TOKEN          # local recording only
+# export AGENTSHIELD_AUTH_TOKEN=$(openssl rand -hex 16)   # public deploy
 go build -o /tmp/agentshield .
 PORT=8080 OLLAMA_URL=http://localhost:11434 /tmp/agentshield
 
@@ -88,16 +93,16 @@ Record each scene 2-3 times, pick the cleanest, hard-cut between them. Smoother 
 
 *(Response streams in over ~3s. Show it.)*
 
-**[CAM]** Click the small trace icon next to the response.
+**[CAM]** Click the `📋 trace` link in the resp-meta strip above the response box (or the `[trace↗]` link in the event log on the left).
 
-**[OST]** `Trace modal → tier path → quality score`
+**[OST]** `Trace modal → resilience timeline → tier path → quality score`
 
 **[VO]**
-> "Every response runs through a five-tier pipeline — primary, fallback, semantic cache, graceful denial — wrapped in load shedding, bulkheads, hedging, and circuit breakers.
+> "Every response runs through a four-tier pipeline — primary, fallback, semantic cache, graceful denial — wrapped in load shedding, bulkheads, hedging, and circuit breakers.
 >
-> Every step is recorded. Every response carries a trace ID."
+> The trace modal opens with a horizontal **resilience timeline** — one bar per step, width proportional to its latency, colored by outcome. Every step is recorded, every response carries a trace ID."
 
-*(Trace modal shows: Primary tier → quality_score 0.94 → outcome success. Close the modal.)*
+*(Trace modal shows the flame timeline at top, then Primary tier → quality_score 0.94 → outcome success. Close the modal.)*
 
 ---
 
@@ -109,9 +114,9 @@ Record each scene 2-3 times, pick the cleanest, hard-cut between them. Smoother 
 
 **[CAM]** Re-send the same prompt. The response is obvious garbage: *"As an AI language model, I apologize but I cannot assist. As an AI language model, I apologize but I cannot assist..."*
 
-**[CAM]** Switch focus to the dashboard status panel. Point at:
-- `Transport CB: closed ✅` (in green)
-- `Semantic CB: failing ✗` (in red)
+**[CAM]** Switch focus to the dashboard's degradation-chain card on the right. Point at the Primary row:
+- `transport: closed` (green badge)
+- `quality: OPEN` (red badge — the semantic CB just tripped)
 
 **[OST]** `Transport: HEALTHY. Quality: BROKEN. Two independent breakers.`
 
@@ -128,22 +133,35 @@ Record each scene 2-3 times, pick the cleanest, hard-cut between them. Smoother 
 
 ---
 
-### Scene 4 — Chaos demo, the sparkline (1:05 → 1:35)
+### Scene 4 — Side-by-side, the value-prop in one click (1:05 → 1:25)
 
-**[CAM]** Click `✅ Restore Quality` to reset. Wait for badges to go green.
+**[CAM]** Type one more prompt: `What is a goroutine?`. Click `⚖️ Run Compare`.
 
-**[CAM]** Click `▶ Run Chaos Demo`.
+*(Both columns populate ~3-5s later.)*
 
-**[OST]** `▶ Chaos scenario: kill primary → degrade → recover`
+**[OST]** `Shielded vs raw — same prompt, parallel paths, one screen`
 
-**[CAM]** **DON'T narrate over the next 10 seconds.** Just watch the Score sparkline. It should drop 100 → ~75 → ~41 (when both primary killed and degrade enabled), recover through fallback to ~78, then back to 95+.
+**[VO]**
+> "Same prompt. Both paths fired in parallel. Left column: shielded — routed through the full chain. Right column: raw — direct LLM call, no AgentShield.
+>
+> During Degrade mode the raw side shows the garbage the model returned. The shielded side rerouted through fallback and got a real answer. Same model, same prompt — different outcomes."
+
+*(Point at the quality_score badges — shielded shows ~90%, raw shows 18%.)*
+
+---
+
+### Scene 4b — Chaos demo, the sparkline (1:25 → 1:50)
+
+**[CAM]** Click `✅ Restore Quality`. Click `▶ Run Chaos Demo`.
+
+**[OST]** `▶ Chaos: baseline → kill primary → kill fallback → restore`
+
+**[CAM]** **DON'T narrate over the next 15 seconds.** Watch the Score sparkline. It drops 100 → ~75 → ~41 as primary then fallback get killed, recovers through cache to ~78, then back to 95+.
 
 **[VO] (after the score recovers)**
-> "The score dropped to 41 and climbed back to 95. In thirty seconds.
->
-> Each component — transport, quality, cache, availability, latency — heals independently. The composite number is one glance for the operator."
+> "Score dropped to 41 and climbed back to 95 — under a minute. Each component — transport, quality, cache, availability, latency — heals independently. The composite is one number for the operator's glance."
 
-**[CAM]** Point at the `Cost Savings` counter — it should be ticking up because cache hits dodged real LLM calls during chaos.
+**[CAM]** Switch to the **Charts** tab. Point at the live latency-per-tier histogram (p50 / p95 / p99) — primary bars towered during chaos, fallback bars stayed flat. Then point at the `Cost Savings` counter.
 
 **[OST]** `Cost savings: $0.0034 → cache absorbed denied requests`
 
@@ -155,14 +173,14 @@ Record each scene 2-3 times, pick the cleanest, hard-cut between them. Smoother 
 
 **[CAM]** Send a streaming prompt: `Tell me about Go's garbage collector`.
 
-**[CAM]** Tokens stream in. After ~30 tokens of garbage, an **orange horizontal divider** appears in the response with text *"⚡ quality gate tripped: hallucination markers detected → switched to fallback"*. The rest of the response continues from the fallback model.
+**[CAM]** Tokens stream in. After ~30 tokens of garbage, an **orange horizontal divider** appears in the response with text *"⚡ quality gate triggered — switched to fallback (quality gate: matched: ...)"*. The rest of the response continues from the fallback model.
 
 **[OST]** `Streaming quality gate — switches mid-response, no waiting for full output`
 
 **[VO]**
 > "Streaming makes this harder — you can't wait for the full response to evaluate it.
 >
-> So AgentShield checks every 30 tokens. The moment hallucination markers appear, it cancels the primary stream and continues from the fallback. The user sees one continuous response."
+> So AgentShield checks every 30 tokens. The moment refusal markers appear in the stream, it cancels the primary mid-response and continues from the fallback. The user sees one continuous response."
 
 ---
 
@@ -170,7 +188,10 @@ Record each scene 2-3 times, pick the cleanest, hard-cut between them. Smoother 
 
 **[CUT]** Quick switch to Tab 2 (GitHub repo).
 
-**[CAM]** Show the repo file tree briefly. Eight to ten domain packages: `agent`, `orchestrator`, `provider`, `quality`, `cache`, `telemetry`, `memory`, `config`. Linger 2s.
+**[CAM]** Show the repo file tree briefly. Twelve domain packages: `agent`, `orchestrator`, `provider` (Ollama + OpenAI-compatible adapters), `quality`, `cache`, `telemetry`, `memory`, `config`, `api`, `api/web`, `internal/logctx`, `internal/logkeys`. Linger 2s.
+
+**[VO] line-add — multi-provider**
+> "And the chat backend is pluggable. The same resilience stack runs against Ollama locally, OpenAI, Groq, OpenRouter, vLLM — anything speaking the OpenAI chat-completions contract. One env var: `LLM_PROVIDER=openai`."
 
 **[CUT]** Quick switch to Tab 3 (flowguard repo).
 

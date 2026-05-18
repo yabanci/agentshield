@@ -69,30 +69,24 @@
       <button class="tab" role="tab" aria-selected="false" aria-controls="tab-charts" onclick="switchTab('charts')">📊 Charts</button>
     </div>
 
-    <!-- Demo tab -->
+    <!-- Demo tab. Ordered to lead with the unique value-prop (semantic CB
+         on quality degradation, then side-by-side Compare). Generic
+         transport-failure demo comes after — every CB library does that. -->
     <div class="tab-pane active" id="tab-demo">
-      <div class="label">Transport failures</div>
-      <div class="demo-grid">
-        <button class="btn btn-red btn-sm" onclick="kill('primary')">💀 Kill Primary</button>
-        <button class="btn btn-green btn-sm" onclick="restore('primary')">✅ Restore Primary</button>
-        <button class="btn btn-red btn-sm" onclick="kill('fallback')">💀 Kill Fallback</button>
-        <button class="btn btn-green btn-sm" onclick="restore('fallback')">✅ Restore Fallback</button>
-      </div>
-      <hr>
-      <div class="label">🧪 Semantic quality degradation</div>
+      <div class="label">🧪 Semantic quality degradation <span style="font-weight:400;color:#a78bfa;font-size:10px;margin-left:6px">★ killer demo</span></div>
       <p style="font-size:11px;color:#6b7280;margin-bottom:8px">
-        Primary returns <b>HTTP 200</b> but with garbage quality — repetitive, hallucinated, or incoherent responses.
-        Watch the <b>semantic CB</b> open while transport CB stays closed.
+        Primary returns <b>HTTP 200</b> but with garbage quality — looping, refusal phrases, or incoherent responses.
+        Watch the <b>semantic CB</b> open while the transport CB stays closed. No other resilience library catches this.
       </p>
       <div class="demo-grid">
         <button class="btn btn-sm" style="background:#7c3aed;color:#fff" onclick="enableDegrade()">🧪 Enable Degrade</button>
         <button class="btn btn-green btn-sm" onclick="disableDegrade()">✅ Restore Quality</button>
       </div>
       <hr>
-      <div class="label">🪞 Shielded vs raw — side by side</div>
+      <div class="label">⚖️ Shielded vs raw — side by side</div>
       <p style="font-size:11px;color:#6b7280;margin-bottom:8px">
         Fires the same prompt through the full degradation chain AND directly to the LLM in parallel.
-        During degrade mode, watch the raw side return garbage while shielded routes to fallback.
+        During Degrade mode, watch the raw side return garbage while shielded routes to fallback.
       </p>
       <button class="btn btn-sm" style="background:#0891b2;color:#fff" onclick="runCompare()">⚖️ Run Compare</button>
       <div id="compare-result" style="display:none;margin-top:10px"></div>
@@ -103,6 +97,17 @@
       </p>
       <button class="btn btn-purple" id="chaos-btn" onclick="startChaos()">▶ Run Chaos Demo</button>
       <div class="chaos-log" id="chaos-log" style="margin-top:10px;display:none"></div>
+      <hr>
+      <div class="label">Transport failures (classic CB demo)</div>
+      <div class="demo-grid">
+        <button class="btn btn-red btn-sm" onclick="kill('primary')">💀 Kill Primary</button>
+        <button class="btn btn-green btn-sm" onclick="restore('primary')">✅ Restore Primary</button>
+        <button class="btn btn-red btn-sm" onclick="kill('fallback')">💀 Kill Fallback</button>
+        <button class="btn btn-green btn-sm" onclick="restore('fallback')">✅ Restore Fallback</button>
+      </div>
+      <p style="font-size:10px;color:#4b5563;margin-top:6px">
+        Kill/Degrade actions auto-restore after 5 minutes so a public live URL can't be wedged indefinitely.
+      </p>
       <hr>
       <div class="label">Event log</div>
       <div class="log" id="log"></div>
