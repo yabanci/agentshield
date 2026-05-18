@@ -52,7 +52,7 @@ POST /chat
                 │ Quality evaluation (outside transport CB — fully independent)
                 │   • Repetition score (trigram deduplication)
                 │   • Length anomaly (vs rolling baseline)
-                │   • Hallucination markers (pattern matching)
+                │   • Refusal markers (pattern matching)
                 │   • Coherence score (cosine similarity via embeddings)
                 ▼
          Semantic CB records score → may open independently of transport CB

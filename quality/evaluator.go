@@ -2,10 +2,10 @@
 // breaker on quality degradation independent of transport health.
 //
 // QualityEvaluator combines five independent signals — repetition,
-// length anomaly, hallucination markers, coherence (cosine similarity to
-// the prompt), and language mismatch — into a single 0.0–1.0 score with
-// no external API calls. A low score is recorded into SemanticBreaker,
-// which opens when the rolling window drops below the failing threshold.
+// length anomaly, refusal markers, coherence (cosine similarity to the
+// prompt), and language mismatch — into a single 0.0–1.0 score with no
+// external API calls. A low score is recorded into SemanticBreaker, which
+// opens when the rolling window drops below the failing threshold.
 package quality
 
 import (

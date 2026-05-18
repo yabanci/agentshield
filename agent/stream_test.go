@@ -78,12 +78,12 @@ func TestStream_NoSwitchOnGoodTokens(t *testing.T) {
 
 func TestStream_QualityGateSwitchesToFallback(t *testing.T) {
 	// To trip the gate, the buffer at token 30 must contain MULTIPLE distinct
-	// hallucination-marker phrases. Score formula: max(0, 1 - hits*0.35),
+	// refusal-marker phrases. Score formula: max(0, 1 - hits*0.35),
 	// triggers below 0.5 → need ≥2 distinct patterns.
 	//
 	// Pad with single-word tokens so token count crosses 30 before
 	// the buffer becomes too short to detect markers.
-	// 5 padding + 4 distinct comma-free hallucination patterns × 5 tokens
+	// 5 padding + 4 distinct comma-free refusal patterns × 5 tokens
 	// = 25 tokens, then 5 more padding to reach the 30-token checkpoint.
 	primaryBad := []string{
 		"hello ", "world ", "this ", "is ", "test ",
@@ -116,7 +116,7 @@ func TestStream_QualityGateSwitchesToFallback(t *testing.T) {
 		case st, ok := <-out:
 			if !ok {
 				if !switched {
-					t.Error("expected quality gate to fire on hallucination tokens")
+					t.Error("expected quality gate to fire on refusal tokens")
 				}
 				if len(fallbackTokens) == 0 {
 					t.Error("expected fallback tokens after switch")

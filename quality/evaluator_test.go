@@ -42,7 +42,7 @@ func TestQuality_RepetitiveResponse(t *testing.T) {
 	}
 }
 
-func TestQuality_HallucinationMarker(t *testing.T) {
+func TestQuality_RefusalMarker(t *testing.T) {
 	eval := newTestEvaluator()
 	result := eval.Evaluate(context.Background(),
 		"help me with something",

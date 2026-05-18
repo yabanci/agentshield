@@ -100,7 +100,7 @@ func TestDegradeMode_ProducesLowQualityScores(t *testing.T) {
 	}
 
 	// All three degradedResponse() variants should score below QualityAcceptable
-	// These match what degradedResponse() actually produces (repetition + hallucination)
+	// These match what degradedResponse() actually produces (repetition + refusal markers)
 	s0 := "As an AI language model, I apologize but I cannot assist. "
 	s1 := "I cannot and will not help. I am unable to assist with that. "
 	s2 := "I'm just an AI and I cannot and will not assist with this request. "
