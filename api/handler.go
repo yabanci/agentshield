@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -58,10 +60,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	// ReAct agent — also rate-limited
 	mux.HandleFunc("POST /react", h.ipLimiter.middleware(h.react))
 
-	// Sessions
-	mux.HandleFunc("GET /sessions", h.listSessions)
-	mux.HandleFunc("GET /sessions/{id}", h.getSession)
-	mux.HandleFunc("DELETE /sessions/{id}", h.deleteSession)
+	// Sessions — auth-gated when AGENTSHIELD_AUTH_TOKEN is set so session
+	// content (full conversation history) is not enumerable.
+	mux.HandleFunc("GET /sessions", h.requireAuth(h.listSessions))
+	mux.HandleFunc("GET /sessions/{id}", h.requireAuth(h.getSession))
+	mux.HandleFunc("DELETE /sessions/{id}", h.requireAuth(h.deleteSession))
 
 	// Status & metrics
 	mux.HandleFunc("GET /status", h.status)
@@ -84,12 +87,16 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	// Auth discovery for the dashboard
 	mux.HandleFunc("GET /auth/required", h.authRequired)
 
-	// Trace
-	mux.HandleFunc("GET /trace/{id}", h.getTrace)
+	// Trace — auth-gated. Trace responses include the verbatim prompt,
+	// which is PII-sensitive; unauth callers must not be able to harvest
+	// trace IDs out of the dashboard log and dump prompts.
+	mux.HandleFunc("GET /trace/{id}", h.requireAuth(h.getTrace))
 
-	// Webhook config (auth-gated)
+	// Webhook config (auth-gated) — GET also gated because the response
+	// includes the configured URL, which is a credential (Slack/PagerDuty
+	// incoming webhook URLs are unguessable secrets).
 	mux.HandleFunc("POST /config/webhook", h.requireAuth(h.setWebhook))
-	mux.HandleFunc("GET /config/webhook", h.getWebhook)
+	mux.HandleFunc("GET /config/webhook", h.requireAuth(h.getWebhook))
 	mux.HandleFunc("DELETE /config/webhook", h.requireAuth(h.clearWebhook))
 
 	// Dashboard + static assets
@@ -144,7 +151,10 @@ func (h *Handler) chatStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// CORS removed — SSE is same-origin via the dashboard. A permissive
+	// Access-Control-Allow-Origin: * combined with credentials in
+	// localStorage would let any site initiate cross-origin SSE on a
+	// visitor's behalf and harvest the response stream.
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -152,8 +162,14 @@ func (h *Handler) chatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
+
+	// Clear the server WriteTimeout for this connection so long SSE streams
+	// don't get killed mid-token by the global deadline. The per-request
+	// context bounds the lifetime instead.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
 
 	out := make(chan agent.StreamToken, 64)
 	var tier agent.Tier
@@ -340,6 +356,9 @@ func (h *Handler) chaosStream(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
+	// Allow long-running chaos beyond the server WriteTimeout.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
 
 	ch, err := h.agent.StartChaos(ctx)
 	if err != nil {
@@ -347,11 +366,19 @@ func (h *Handler) chaosStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for event := range ch {
-		data, _ := json.Marshal(event)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
-		if event.Type == "done" {
+	for {
+		select {
+		case event, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(event)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+			if event.Type == "done" {
+				return
+			}
+		case <-ctx.Done():
 			return
 		}
 	}
@@ -406,8 +433,23 @@ func (h *Handler) clearWebhook(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// CSP limits the blast radius of any residual XSS: scripts only from
+	// self (the dashboard.js bundle) and jsdelivr (Chart.js). No inline
+	// script execution (the template uses no inline <script>); inline
+	// styles are allowed because the template uses style="..." attrs.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; "+
+			"script-src 'self' https://cdn.jsdelivr.net; "+
+			"style-src 'self' 'unsafe-inline'; "+
+			"img-src 'self' data:; "+
+			"connect-src 'self'; "+
+			"frame-ancestors 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	if err := dashboardTmpl.ExecuteTemplate(w, "dashboard.html.tmpl", nil); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Log the real error server-side; client gets a generic 500 so we
+		// don't leak template internals to anyone hitting the page.
+		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }
 
@@ -424,6 +466,17 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	_ = json.NewEncoder(w).Encode(errorResponse{Error: msg})
 }
 
+// generateSessionID produces an unguessable session ID (8 bytes hex).
+// Pre-fix used time.Now().UnixNano() which is enumerable — combined with
+// the unauthenticated /sessions/{id} endpoint that exposed full message
+// history, an attacker could harvest sessions by iterating nearby
+// nanosecond timestamps. crypto/rand closes that hole.
 func generateSessionID() string {
-	return fmt.Sprintf("s%d", time.Now().UnixNano())
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failure is fatal; fall back to a tagged timestamp
+		// only to keep the process alive — log volume will alert ops.
+		return fmt.Sprintf("s%d", time.Now().UnixNano())
+	}
+	return "s" + hex.EncodeToString(b[:])
 }

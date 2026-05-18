@@ -61,12 +61,21 @@ func (o *Orchestrator) StreamWithQualityGate(ctx context.Context, prompt string,
 					cancelStream() // abort primary stream
 					for range rawTokens {
 					} // drain so goroutine can exit
-					out <- StreamToken{Switched: true, Tier: memory.TierFallback,
-						Reason: "quality gate: " + reason}
+					if !sendToken(ctx, out, StreamToken{Switched: true, Tier: memory.TierFallback,
+						Reason: "quality gate: " + reason}) {
+						return memory.TierPrimary, ctx.Err()
+					}
 					break
 				}
 			}
-			out <- StreamToken{Token: token, Tier: memory.TierPrimary}
+			if !sendToken(ctx, out, StreamToken{Token: token, Tier: memory.TierPrimary}) {
+				// Client disconnected — drain producer so its goroutine can exit.
+				cancelStream()
+				for range rawTokens {
+				}
+				<-errCh
+				return memory.TierPrimary, ctx.Err()
+			}
 		}
 		cancelStream() // no-op if already cancelled; always call to free resources
 
@@ -78,12 +87,31 @@ func (o *Orchestrator) StreamWithQualityGate(ctx context.Context, prompt string,
 
 	// Fallback stream (no quality gate — fallback must always complete).
 	// Provider closes rawTokens per LLMProvider contract.
+	fallbackCtx, cancelFallback := context.WithCancel(ctx)
+	defer cancelFallback()
 	rawTokens := make(chan string, 64)
 	go func() {
-		_ = o.fallback.Stream(ctx, provider.Request{Model: o.fallbackModel, Prompt: prompt}, rawTokens)
+		_ = o.fallback.Stream(fallbackCtx, provider.Request{Model: o.fallbackModel, Prompt: prompt}, rawTokens)
 	}()
 	for token := range rawTokens {
-		out <- StreamToken{Token: token, Tier: memory.TierFallback}
+		if !sendToken(ctx, out, StreamToken{Token: token, Tier: memory.TierFallback}) {
+			cancelFallback()
+			for range rawTokens {
+			}
+			return memory.TierFallback, ctx.Err()
+		}
 	}
 	return memory.TierFallback, nil
+}
+
+// sendToken writes to out, respecting ctx cancellation so a disconnected
+// client does not pin the producer goroutine in a blocked channel send.
+// Returns false when ctx is done.
+func sendToken(ctx context.Context, out chan<- StreamToken, t StreamToken) bool {
+	select {
+	case out <- t:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

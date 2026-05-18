@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -31,7 +32,15 @@ type WebhookDispatcher struct {
 
 func NewWebhookDispatcher() *WebhookDispatcher {
 	return &WebhookDispatcher{
-		client: &http.Client{Timeout: 5 * time.Second},
+		client: &http.Client{
+			Timeout: 5 * time.Second,
+			// Refuse redirects: a 301/302 to an internal IP (e.g.
+			// http://10.0.0.1/) would bypass the validation done at SetURL
+			// time. Webhook receivers don't legitimately need redirects.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 
@@ -86,7 +95,10 @@ func (w *WebhookDispatcher) Fire(event WebhookEvent) {
 		if err != nil {
 			return
 		}
-		defer resp.Body.Close() //nolint:errcheck
+		// Drain the body so the underlying TCP connection can be reused.
+		// Without this, Go's HTTP pool keeps the connection in TIME_WAIT.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
 	}()
 }
 
