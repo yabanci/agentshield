@@ -95,11 +95,13 @@ func (e *QualityEvaluator) Evaluate(ctx context.Context, prompt, response string
 		e.recordLength(len(response))
 	}
 
-	// ── Signal 3: Hallucination markers (weight 0.40) ───────────────────────
-	hallScore, hallDetail := HallucinationScore(response)
-	if hallScore < 1.0 {
-		penalty := (1.0 - hallScore) * 0.40
-		signals = append(signals, QualitySignal{"hallucination_marker", penalty, hallDetail})
+	// ── Signal 3: Refusal markers (max penalty 0.40) ───────────────────────
+	// Catches "as an AI...", "I cannot...", persona-leak phrasing.
+	// Does NOT catch factual hallucinations — see RefusalMarkerScore doc.
+	refScore, refDetail := RefusalMarkerScore(response)
+	if refScore < 1.0 {
+		penalty := (1.0 - refScore) * 0.40
+		signals = append(signals, QualitySignal{"refusal_marker", penalty, refDetail})
 		score -= penalty
 	}
 
@@ -210,8 +212,14 @@ func (e *QualityEvaluator) avgLength() float64 {
 	return float64(sum) / float64(end)
 }
 
-// HallucinationScore penalises known refusal/hallucination phrases.
-var hallucinationPatterns = []string{
+// refusalMarkerPatterns are the canonical phrases an LLM emits when it
+// refuses a request or breaks character. They flag STRUCTURAL degradation
+// (the model has stopped trying to answer the prompt), not factual
+// inaccuracy. A confidently-wrong response with no markers still scores
+// 1.0 — defending against factual hallucination requires a much heavier
+// approach (entailment checks, ground-truth retrieval) outside this
+// service's scope.
+var refusalMarkerPatterns = []string{
 	"as an ai language model",
 	"i cannot and will not",
 	"i am unable to assist",
@@ -223,11 +231,16 @@ var hallucinationPatterns = []string{
 	"i'm just an ai",
 }
 
-func HallucinationScore(text string) (float64, string) {
+// RefusalMarkerScore penalises responses that contain refusal phrases or
+// persona-leak strings. Returns 1.0 when the response is clean. Each hit
+// subtracts 0.35 from the score (clamped to 0). The signal is named for
+// what it actually detects — pre-fix it was called HallucinationScore,
+// which implied factual-accuracy detection it does not perform.
+func RefusalMarkerScore(text string) (float64, string) {
 	lower := strings.ToLower(text)
 	hits := 0
 	var matched []string
-	for _, p := range hallucinationPatterns {
+	for _, p := range refusalMarkerPatterns {
 		if strings.Contains(lower, p) {
 			hits++
 			matched = append(matched, p)
@@ -265,11 +278,20 @@ func (e *QualityEvaluator) coherenceScore(ctx context.Context, prompt, response 
 	score := 1.0
 	detail := ""
 
-	if sim < 0.10 {
+	// nomic-embed-text typical ranges: clearly off-topic pairs score 0.15–0.35,
+	// same-topic pairs score 0.55–0.80. Anchoring penalty bands to those
+	// observations — pre-fix the upper band ended at 0.35, which meant a
+	// genuinely off-topic response (sim ≈ 0.30) skated through unscathed and
+	// the signal contributed nothing in practice.
+	const (
+		coherenceUnrelated = 0.20 // below this → full penalty
+		coherenceOnTopic   = 0.55 // above this → no penalty
+	)
+	if sim < coherenceUnrelated {
 		return 0.0, "response semantically unrelated to prompt"
 	}
-	if sim < 0.35 {
-		score = (sim - 0.10) / (0.35 - 0.10)
+	if sim < coherenceOnTopic {
+		score = (sim - coherenceUnrelated) / (coherenceOnTopic - coherenceUnrelated)
 		detail = "low semantic relevance to prompt"
 	}
 

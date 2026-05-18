@@ -49,16 +49,16 @@ func TestQuality_HallucinationMarker(t *testing.T) {
 		"As an AI language model, I cannot assist with that request. I apologize, but as an AI I don't have access to real-time information.",
 	)
 	if result.Score >= 0.70 {
-		t.Errorf("hallucination response should score < 0.70, got %.2f", result.Score)
+		t.Errorf("refusal response should score < 0.70, got %.2f", result.Score)
 	}
 	hasMarker := false
 	for _, sig := range result.Signals {
-		if sig.Name == "hallucination_marker" {
+		if sig.Name == "refusal_marker" {
 			hasMarker = true
 		}
 	}
 	if !hasMarker {
-		t.Error("expected hallucination_marker signal")
+		t.Error("expected refusal_marker signal")
 	}
 }
 

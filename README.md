@@ -89,13 +89,29 @@ The core innovation. Two states per model, tracked independently:
 |---|---|---|
 | Repetition | Trigram deduplication — detects looping responses | 0.45 |
 | Length anomaly | Deviation from rolling baseline (absolute min: 10 chars) | 0.25 |
-| Hallucination markers | 9 known refusal/hallucination phrases | 0.40 |
+| Refusal markers | 9 known refusal/persona-leak phrases ("as an AI...", "I cannot...") | 0.40 |
 | Coherence | Cosine similarity to prompt via embeddings | 0.20 |
 | Language mismatch | Latin vs CJK script disagreement with the prompt | 0.30 |
 
 (Penalties stack additively, then the final score is clipped to `[0,1]`.)
 
-**Adaptive calibration**: the semantic CB observes the first 20 responses and automatically sets thresholds to `mean ± 1σ` and `mean ± 2σ`. A model consistently scoring 0.95 ± 0.03 gets tight thresholds (degraded < 0.92, failing < 0.89). A model scoring 0.70 ± 0.15 gets looser ones. No manual tuning.
+**What "quality degradation" actually means here.** The semantic CB catches
+*structural* degradation — loops, refusals to answer, persona breaks, gibberish,
+off-topic responses, wrong-language output. It does NOT detect factual
+hallucination (a fluent, well-formed, wrong answer). Defending against factual
+accuracy requires ground-truth retrieval or entailment checks outside the
+scope of a local resilience layer. The pitch is honest about what the breaker
+catches; production users layering AgentShield should add factual checks
+separately if their use case demands it.
+
+**Adaptive calibration**: the semantic CB observes the first 20 healthy
+responses and sets thresholds at `mean ± 1σ` (degraded) and `mean ± 2σ`
+(failing). A 0.05 floor on σ keeps perfectly consistent models from
+self-calibrating to an over-tight breaker. Bad samples (below 0.45) are
+excluded from the calibration window so enabling degrade mode early in the
+session can't poison the baseline. A model scoring 0.95 ± 0.03 ends up at
+roughly degraded < 0.90, failing < 0.85; a noisier model gets a wider band.
+No manual tuning.
 
 ---
 
@@ -182,7 +198,7 @@ GET /trace/tr_a1b2c3d4
       "transport_cb": "closed",
       "semantic_cb": "failing",
       "quality_score": 0.18,
-      "quality_signals": ["repetition", "hallucination_marker"],
+      "quality_signals": ["repetition", "refusal_marker"],
       "outcome": "semantic_failure"
     },
     {
@@ -228,7 +244,7 @@ Payload on state change:
 ## Streaming Quality Gate
 
 `GET /chat/stream` streams tokens via SSE with an inline quality gate.  
-If hallucination markers are detected in the first 120 tokens, the stream aborts and continues from fallback — automatically.
+If refusal/persona-leak markers are detected in the first 120 tokens, the stream aborts and continues from fallback — automatically.
 
 ```
 [token1][token2]...[token47]  ← from primary

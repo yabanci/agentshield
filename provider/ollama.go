@@ -19,6 +19,7 @@ const defaultOllamaEmbedModel = "nomic-embed-text"
 
 type OllamaProvider struct {
 	http       *http.Client
+	streamHTTP *http.Client // longer timeout for streaming generations
 	baseURL    string
 	embedModel string
 }
@@ -57,7 +58,12 @@ func NewOllama(cfg config.ProviderConfig) *OllamaProvider {
 		embedModel = defaultOllamaEmbedModel
 	}
 	return &OllamaProvider{
-		http:       &http.Client{Timeout: timeout},
+		http: &http.Client{Timeout: timeout},
+		// streamHTTP is a separate client because streaming has a much longer
+		// upper bound than a non-streaming Generate. Reusing across calls
+		// keeps connections in the pool and avoids the fd leak from
+		// constructing a fresh client on every Stream invocation.
+		streamHTTP: &http.Client{Timeout: 120 * time.Second},
 		baseURL:    cfg.BaseURL,
 		embedModel: embedModel,
 	}
@@ -110,8 +116,7 @@ func (o *OllamaProvider) Stream(ctx context.Context, req Request, out chan<- str
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	streamClient := &http.Client{Timeout: 120 * time.Second}
-	resp, err := streamClient.Do(httpReq)
+	resp, err := o.streamHTTP.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("ollama stream call: %w", err)
 	}
