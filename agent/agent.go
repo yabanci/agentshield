@@ -121,11 +121,39 @@ func newAgent(cfg *config.Config, log *slog.Logger) *Agent {
 		fallbackModel = ModelFallback
 	}
 
-	ol := provider.NewOllama(cfg.Provider)
+	// Provider selection.
+	//
+	// Ollama is the default — local, free, ideal for demos and dev.
+	// Setting LLM_PROVIDER=openai switches the chat backend to any
+	// OpenAI-compatible /v1/chat/completions endpoint. The embedder stays
+	// on Ollama by default (cost) unless OPENAI_EMBED_MODEL is set.
+	var chatProvider provider.LLMProvider
+	var embedProvider provider.Embedder
+	switch cfg.Provider.Kind {
+	case "openai":
+		oa := provider.NewOpenAI(cfg.Provider)
+		chatProvider = oa
+		if cfg.Provider.EmbedModel != "" {
+			embedProvider = oa
+		} else {
+			// Keep an Ollama embedder available so the cache and quality
+			// evaluator still work; cost stays at zero unless caller opts in.
+			embedProvider = provider.NewOllama(config.ProviderConfig{
+				Kind:    "ollama",
+				BaseURL: "http://localhost:11434",
+				Timeout: cfg.Provider.Timeout,
+			})
+		}
+	default: // "ollama" or empty
+		ol := provider.NewOllama(cfg.Provider)
+		chatProvider = ol
+		embedProvider = ol
+	}
+
 	// Wrap primary in DegradedWrapper so chaos demo can inject low-quality
 	// responses without taking the backend down. Fallback is NOT wrapped —
 	// chaos affects primary only.
-	degraded := provider.NewDegradedWrapper(ol)
+	degraded := provider.NewDegradedWrapper(chatProvider)
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	a := &Agent{
 		lifeCtx:       lifeCtx,
@@ -135,8 +163,8 @@ func newAgent(cfg *config.Config, log *slog.Logger) *Agent {
 		primaryModel:  primaryModel,
 		fallbackModel: fallbackModel,
 		primary:       degraded,
-		fallback:      ol,
-		embedder:      ol,
+		fallback:      chatProvider,
+		embedder:      embedProvider,
 		chaos:         orchestrator.NewChaos(degraded),
 
 		// Bulkheads: limit concurrent requests per priority class.

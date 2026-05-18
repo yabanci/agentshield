@@ -44,9 +44,21 @@ func (c *Config) NewLogger(out io.Writer) *slog.Logger {
 }
 
 type ProviderConfig struct {
-	Kind    string
+	// Kind selects the backend: "ollama" (default) or "openai" for any
+	// OpenAI-compatible /v1/chat/completions endpoint (OpenAI, Groq,
+	// Together, OpenRouter, vLLM, llama.cpp server, Mistral, ...).
+	Kind string
+	// BaseURL is the API root. For Ollama, "http://localhost:11434". For
+	// OpenAI, "https://api.openai.com/v1". For Groq, "https://api.groq.com/openai/v1".
 	BaseURL string
-	Timeout time.Duration
+	// APIKey is the bearer token for OpenAI-compatible providers. Ignored
+	// by the Ollama backend. Read from $OPENAI_API_KEY by default.
+	APIKey string
+	// EmbedModel is the embedding model name for OpenAI providers. Leave
+	// empty to keep embeddings flowing through Ollama, which is the
+	// default and keeps demo costs at zero.
+	EmbedModel string
+	Timeout    time.Duration
 }
 
 type ModelsConfig struct {
