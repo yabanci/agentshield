@@ -398,6 +398,105 @@ func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out ch
 	return a.orch.StreamWithQualityGate(ctx, prompt, out)
 }
 
+// CompareResult is the per-side outcome of a side-by-side comparison.
+type CompareResult struct {
+	Text         string  `json:"text"`
+	Tier         string  `json:"tier,omitempty"`
+	LatencyMS    int64   `json:"latency_ms"`
+	QualityScore float64 `json:"quality_score"`
+	Cached       bool    `json:"cached,omitempty"`
+	TraceID      string  `json:"trace_id,omitempty"`
+	Error        string  `json:"error,omitempty"`
+}
+
+// ComparePair bundles a shielded + raw run of the same prompt for the
+// /demo/compare endpoint. Shielded goes through the full degradation
+// chain; raw calls the underlying LLM provider directly with no CB, no
+// retry, no quality gate, no semantic cache. The whole point is to make
+// the value of AgentShield visible — during degrade mode, the raw side
+// returns garbage with high latency and low quality_score; the shielded
+// side returns a good answer via the fallback model.
+type ComparePair struct {
+	Prompt    string        `json:"prompt"`
+	Shielded  CompareResult `json:"shielded"`
+	Raw       CompareResult `json:"raw"`
+	DurationMS int64        `json:"duration_ms"`
+}
+
+// Compare fires the same prompt through both the resilience stack and a
+// raw provider call, concurrently. Returns once both finish (or fail).
+// The raw side uses the primary model name but bypasses the chaos
+// wrapper — i.e. it talks directly to the underlying LLM, so the user
+// sees what would happen without AgentShield's mitigations.
+func (a *Agent) Compare(ctx context.Context, prompt string) ComparePair {
+	pair := ComparePair{Prompt: prompt}
+	start := time.Now()
+
+	type shieldedOut struct {
+		resp Response
+		err  error
+		dur  time.Duration
+	}
+	type rawOut struct {
+		text string
+		err  error
+		dur  time.Duration
+	}
+	shieldedCh := make(chan shieldedOut, 1)
+	rawCh := make(chan rawOut, 1)
+
+	go func() {
+		t := time.Now()
+		resp, err := a.Ask(ctx, prompt)
+		shieldedCh <- shieldedOut{resp: resp, err: err, dur: time.Since(t)}
+	}()
+
+	go func() {
+		t := time.Now()
+		// Bypass the DegradedWrapper and all flowguard layers — talk
+		// directly to the chat provider. The fallback field on Agent is
+		// the unwrapped chatProvider, so we reuse it here.
+		r, err := a.fallback.Generate(ctx, provider.Request{
+			Model:  a.primaryModel,
+			Prompt: prompt,
+		})
+		rawCh <- rawOut{text: r.Text, err: err, dur: time.Since(t)}
+	}()
+
+	s := <-shieldedCh
+	r := <-rawCh
+
+	// Evaluate quality on both sides so the dashboard can show that the
+	// raw response is, say, 0.18 while the shielded response is 0.91.
+	eval := quality.NewEvaluator(a.embedder.Embed)
+
+	pair.Shielded = CompareResult{
+		Text:      s.resp.Text,
+		Tier:      string(s.resp.Tier),
+		Cached:    s.resp.Cached,
+		TraceID:   s.resp.TraceID,
+		LatencyMS: s.dur.Milliseconds(),
+	}
+	if s.err != nil {
+		pair.Shielded.Error = s.err.Error()
+	} else if s.resp.Text != "" {
+		pair.Shielded.QualityScore = eval.Evaluate(ctx, prompt, s.resp.Text).Score
+	}
+
+	pair.Raw = CompareResult{
+		Text:      r.text,
+		LatencyMS: r.dur.Milliseconds(),
+	}
+	if r.err != nil {
+		pair.Raw.Error = r.err.Error()
+	} else if r.text != "" {
+		pair.Raw.QualityScore = eval.Evaluate(ctx, prompt, r.text).Score
+	}
+
+	pair.DurationMS = time.Since(start).Milliseconds()
+	return pair
+}
+
 // KillPrimary / RestorePrimary simulate primary model failures.
 func (a *Agent) KillPrimary() { a.chaos.KillPrimary() }
 func (a *Agent) RestorePrimary() { a.chaos.RestorePrimary() }
