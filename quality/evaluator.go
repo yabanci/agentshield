@@ -1,8 +1,11 @@
-// Package agent — quality.go
+// Package quality scores LLM responses and trips a semantic circuit
+// breaker on quality degradation independent of transport health.
 //
-// QualityEvaluator scores an LLM response without any external API calls.
-// Four independent signals combine into a single 0.0–1.0 quality score.
-// Low score → SemanticBreaker records a failure → may open the circuit.
+// QualityEvaluator combines five independent signals — repetition,
+// length anomaly, hallucination markers, coherence (cosine similarity to
+// the prompt), and language mismatch — into a single 0.0–1.0 score with
+// no external API calls. A low score is recorded into SemanticBreaker,
+// which opens when the rolling window drops below the failing threshold.
 package quality
 
 import (

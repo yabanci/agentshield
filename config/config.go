@@ -83,16 +83,24 @@ type LimitsConfig struct {
 }
 
 type QualityConfig struct {
+	// AcceptableScore is the floor below which a response counts as a
+	// semantic failure. Reserved for future tuning; the quality evaluator
+	// currently uses the package-level QualityAcceptable constant.
 	AcceptableScore float64
-	DriftWindow     int
-	DriftSigma      float64
+	// DriftWindow / DriftSigma are reserved for tuning the long-term mean
+	// drift detector. The detector currently uses fixed thresholds in
+	// quality/breaker.go.
+	DriftWindow int
+	DriftSigma  float64
 }
 
 type CacheConfig struct {
 	TTL                 time.Duration
 	SimilarityThreshold float64
 	MaxEntries          int
-	EmbedAsync          bool
+	// EmbedAsync is reserved. The cache always populates embeddings
+	// asynchronously today; setting this field has no runtime effect.
+	EmbedAsync bool
 }
 
 type WebhookConfig struct {
@@ -102,9 +110,14 @@ type WebhookConfig struct {
 }
 
 type ScoreConfig struct {
-	HistorySize      int
+	HistorySize int
+	// LatencyP95Target is reserved for future tuning. ComputeScore in
+	// telemetry/score.go currently uses fixed latency bands (<1s, <3s, ...).
 	LatencyP95Target time.Duration
-	Weights          map[string]int
+	// Weights are reserved for future tuning. Each component of the
+	// Resilience Score is currently a fixed 20-point band. Validate()
+	// still enforces the sum=100 invariant in case the field is wired later.
+	Weights map[string]int
 }
 
 // Validate fails fast on misconfigurations that would only surface at request time.

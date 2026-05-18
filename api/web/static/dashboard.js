@@ -324,12 +324,14 @@ async function restore(which){
   await refreshStatus();
 }
 async function enableDegrade(){
-  await fetch('/demo/degrade',{method:'POST'});
+  // authFetch (not fetch) — these endpoints are requireAuth-gated like
+  // /demo/kill, otherwise the demo silently 401s when a token is set.
+  await authFetch('/demo/degrade',{method:'POST'});
   log('🧪 Degrade mode ON — primary returns low-quality responses (HTTP 200 ✓)','lw');
   await refreshStatus();
 }
 async function disableDegrade(){
-  await fetch('/demo/restore-quality',{method:'POST'});
+  await authFetch('/demo/restore-quality',{method:'POST'});
   log('✅ Quality restored — primary back to normal','');
   await refreshStatus();
 }

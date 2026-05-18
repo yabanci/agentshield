@@ -38,13 +38,26 @@ func TestIPLimiter_DifferentIPsAreIndependent(t *testing.T) {
 }
 
 func TestIPLimiter_ClientIPParses(t *testing.T) {
+	// Default limiter has NO trusted proxies — only RemoteAddr is honored.
+	untrusted := newIPLimiter()
+	// A limiter with explicit trusted proxies honors X-Forwarded-For /
+	// X-Real-IP only when the TCP peer falls inside the allowlist.
+	trusted := &ipLimiter{
+		limiters:       map[string]*ipEntry{},
+		limit:          defaultIPRateLimit,
+		window:         defaultIPRateWindow,
+		trustedProxies: loadTrustedProxies("10.0.0.0/8"),
+	}
+
 	cases := []struct {
-		name string
-		req  func() *http.Request
-		want string
+		name    string
+		limiter *ipLimiter
+		req     func() *http.Request
+		want    string
 	}{
 		{
-			name: "RemoteAddr",
+			name:    "RemoteAddr — no proxy",
+			limiter: untrusted,
 			req: func() *http.Request {
 				r := httptest.NewRequest(http.MethodGet, "/", nil)
 				r.RemoteAddr = "203.0.113.5:54321"
@@ -53,7 +66,19 @@ func TestIPLimiter_ClientIPParses(t *testing.T) {
 			want: "203.0.113.5",
 		},
 		{
-			name: "X-Real-IP wins over RemoteAddr",
+			name:    "Untrusted X-Forwarded-For ignored (spoof attempt)",
+			limiter: untrusted,
+			req: func() *http.Request {
+				r := httptest.NewRequest(http.MethodGet, "/", nil)
+				r.RemoteAddr = "1.2.3.4:80"
+				r.Header.Set("X-Forwarded-For", "9.9.9.9")
+				return r
+			},
+			want: "1.2.3.4",
+		},
+		{
+			name:    "Trusted peer can set X-Real-IP",
+			limiter: trusted,
 			req: func() *http.Request {
 				r := httptest.NewRequest(http.MethodGet, "/", nil)
 				r.RemoteAddr = "10.0.0.1:80"
@@ -63,22 +88,79 @@ func TestIPLimiter_ClientIPParses(t *testing.T) {
 			want: "1.2.3.4",
 		},
 		{
-			name: "X-Forwarded-For first IP",
+			name:    "Trusted peer X-Forwarded-For takes first IP",
+			limiter: trusted,
 			req: func() *http.Request {
 				r := httptest.NewRequest(http.MethodGet, "/", nil)
+				r.RemoteAddr = "10.0.0.5:80"
 				r.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.1, 198.51.100.10")
 				return r
 			},
 			want: "203.0.113.5",
 		},
+		{
+			name:    "Untrusted peer falsely claiming X-Forwarded-For",
+			limiter: trusted,
+			req: func() *http.Request {
+				r := httptest.NewRequest(http.MethodGet, "/", nil)
+				r.RemoteAddr = "8.8.8.8:80" // not in 10.0.0.0/8
+				r.Header.Set("X-Forwarded-For", "1.2.3.4")
+				return r
+			},
+			want: "8.8.8.8",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := clientIP(c.req())
+			got := c.limiter.clientIPFor(c.req())
 			if got != c.want {
 				t.Errorf("got %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestIPLimiter_XForwardedForSpoofingBlocked is the regression test for the
+// round-2 audit finding H-R2-2. Pre-fix, a malicious caller could set
+// X-Forwarded-For to a rotating value and never hit the per-IP cap.
+func TestIPLimiter_XForwardedForSpoofingBlocked(t *testing.T) {
+	l := newIPLimiter()
+	hits := 0
+	h := l.middleware(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	})
+	// Same TCP peer cycling X-Forwarded-For shouldn't escape the limit.
+	for i := 0; i < defaultIPRateLimit+10; i++ {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = "1.2.3.4:5000"
+		r.Header.Set("X-Forwarded-For", fmtIP(i)) // distinct value each call
+		w := httptest.NewRecorder()
+		h(w, r)
+	}
+	if hits != defaultIPRateLimit {
+		t.Errorf("X-Forwarded-For spoof should not bypass limit: got %d hits, want %d",
+			hits, defaultIPRateLimit)
+	}
+}
+
+// TestIPLimiter_CompareTighterLimit verifies that /demo/compare uses the
+// tighter 10 req/min cap distinct from /chat's 60 req/min.
+func TestIPLimiter_CompareTighterLimit(t *testing.T) {
+	l := newIPLimiter()
+	hits := 0
+	h := l.compareMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	})
+	for i := 0; i < compareIPRateLimit+5; i++ {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = "1.2.3.4:5000"
+		w := httptest.NewRecorder()
+		h(w, r)
+	}
+	if hits != compareIPRateLimit {
+		t.Errorf("compareMiddleware should serve exactly %d, got %d", compareIPRateLimit, hits)
 	}
 }
 

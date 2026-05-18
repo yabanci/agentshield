@@ -12,11 +12,15 @@ import (
 	"github.com/yabanci/agentshield/config"
 )
 
-const ollamaEmbedModel = "nomic-embed-text"
+// defaultOllamaEmbedModel is used when ProviderConfig.EmbedModel is unset.
+// nomic-embed-text ships in the Quick Start so this default keeps existing
+// deployments working without configuration.
+const defaultOllamaEmbedModel = "nomic-embed-text"
 
 type OllamaProvider struct {
-	http    *http.Client
-	baseURL string
+	http       *http.Client
+	baseURL    string
+	embedModel string
 }
 
 type ollamaRequest struct {
@@ -40,15 +44,22 @@ type ollamaEmbedResponse struct {
 }
 
 // NewOllama constructs a provider talking to an Ollama backend at cfg.BaseURL.
-// Timeout defaults to 60s if cfg.Timeout is zero.
+// Timeout defaults to 60s if cfg.Timeout is zero. EmbedModel defaults to
+// "nomic-embed-text" if not set on cfg — overridable so an operator can
+// run a different embedding model without modifying source.
 func NewOllama(cfg config.ProviderConfig) *OllamaProvider {
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
+	embedModel := cfg.EmbedModel
+	if embedModel == "" {
+		embedModel = defaultOllamaEmbedModel
+	}
 	return &OllamaProvider{
-		http:    &http.Client{Timeout: timeout},
-		baseURL: cfg.BaseURL,
+		http:       &http.Client{Timeout: timeout},
+		baseURL:    cfg.BaseURL,
+		embedModel: embedModel,
 	}
 }
 
@@ -132,7 +143,7 @@ func (o *OllamaProvider) Stream(ctx context.Context, req Request, out chan<- str
 }
 
 func (o *OllamaProvider) Embed(ctx context.Context, text string) ([]float64, error) {
-	body, err := json.Marshal(ollamaEmbedRequest{Model: ollamaEmbedModel, Prompt: text})
+	body, err := json.Marshal(ollamaEmbedRequest{Model: o.embedModel, Prompt: text})
 	if err != nil {
 		return nil, fmt.Errorf("embed marshal: %w", err)
 	}

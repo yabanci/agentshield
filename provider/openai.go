@@ -242,6 +242,13 @@ func (o *OpenAIProvider) Stream(ctx context.Context, req Request, out chan<- str
 			}
 		}
 	}
+	// Scanner stopped — either clean EOF or context cancelled mid-read.
+	// scanner.Err() returns nil on EOF, but if ctx fired at the same moment
+	// the upstream closed the body we should surface ctx.Err() so the
+	// orchestrator records a cancellation, not a clean success.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return scanner.Err()
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -45,11 +46,17 @@ func validatePrompt(prompt string) (int, string, bool) {
 type Handler struct {
 	agent     *agent.Agent
 	cfg       *config.Config
+	log       *slog.Logger
 	ipLimiter *ipLimiter
 }
 
 func New(a *agent.Agent, cfg *config.Config) *Handler {
-	return &Handler{agent: a, cfg: cfg, ipLimiter: newIPLimiter()}
+	return &Handler{
+		agent:     a,
+		cfg:       cfg,
+		log:       slog.Default().With(slog.String("component", "api")),
+		ipLimiter: newIPLimiter(),
+	}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -74,9 +81,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health/ready", h.healthReady)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	// Compare — fires shielded + raw concurrently. Rate-limited but not
-	// auth-gated; the visible value of the comparison IS the demo.
-	mux.HandleFunc("POST /demo/compare", h.ipLimiter.middleware(h.compare))
+	// Compare — fires shielded + raw concurrently. Tighter rate limit than
+	// /chat (10/min vs 60/min) because each call costs 2x LLM + 6x embed.
+	mux.HandleFunc("POST /demo/compare", h.ipLimiter.compareMiddleware(h.compare))
 
 	// Demo controls (auth-gated when AGENTSHIELD_AUTH_TOKEN is set)
 	mux.HandleFunc("POST /demo/kill", h.requireAuth(h.killPrimary))
@@ -139,7 +146,10 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 		resp, err = h.agent.Ask(ctx, req.Prompt)
 	}
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		// Errors from the provider often embed the upstream URL (Ollama or
+		// OpenAI base URL). Don't propagate that to the public response.
+		h.log.Warn("chat request failed", "err", err)
+		jsonError(w, "request failed", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, resp)
@@ -237,7 +247,8 @@ func (h *Handler) react(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.agent.React(ctx, req.Prompt, sessionID)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		h.log.Warn("react request failed", "err", err)
+		jsonError(w, "request failed", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, resp)
@@ -342,23 +353,30 @@ func (h *Handler) compare(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, msg, code)
 		return
 	}
-	// Compare can take ~2x normal latency because both sides run; give it
-	// the same upper bound as /chat to keep behavior predictable.
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	// Compare can take ~2x normal latency because both sides run.
+	// Ceiling is 65s so it can't outlive the server WriteTimeout (70s) —
+	// pre-fix it was 90s, which combined with a held-open TCP session
+	// kept both goroutines running for 20s past WriteTimeout.
+	ctx, cancel := context.WithTimeout(r.Context(), 65*time.Second)
 	defer cancel()
+	// Clear per-request write deadline so a slow LLM doesn't fail the
+	// final flush before we return JSON.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
 	jsonOK(w, h.agent.Compare(ctx, req.Prompt))
 }
 
 func (h *Handler) startChaos(w http.ResponseWriter, r *http.Request) {
-	// Non-blocking: return 202, chaos runs in background.
-	// Use the agent's lifetime context so chaos terminates on server shutdown
-	// rather than running forever (would block clean exit).
+	// Non-blocking: chaos runs in the background under the agent's lifetime
+	// context so it terminates on shutdown rather than wedging exit.
 	_, err := h.agent.StartChaos(h.agent.LifecycleContext())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusConflict)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
+	// 200 + JSON body so downstream tooling sees Content-Type: application/json.
+	// Pre-fix this wrote 202 first, which made jsonOK's Content-Type Set() a
+	// no-op (headers already committed) — clients got JSON without the header.
 	jsonOK(w, map[string]string{"result": "chaos scenario started — stream at /demo/chaos/stream"})
 }
 

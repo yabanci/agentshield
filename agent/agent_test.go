@@ -174,3 +174,84 @@ func TestStatus_ReflectsAllFields(t *testing.T) {
 		t.Error("loadshed limit should be > 0")
 	}
 }
+
+// TestCompare_BasicFlow exercises POST /demo/compare's happy path: both
+// sides return text, both have non-zero latencies, the shielded result
+// carries a tier label and the raw result does not (raw bypasses the
+// orchestrator's tier logic).
+func TestCompare_BasicFlow(t *testing.T) {
+	srv := mockOllama(t, false)
+	defer srv.Close()
+
+	a := agent.NewWithOllamaURL(srv.URL)
+	pair := a.Compare(context.Background(), "what is go?")
+
+	if pair.Prompt != "what is go?" {
+		t.Errorf("prompt echo mismatch: %q", pair.Prompt)
+	}
+	if pair.Shielded.Text == "" {
+		t.Error("shielded text should be non-empty")
+	}
+	if pair.Raw.Text == "" {
+		t.Error("raw text should be non-empty")
+	}
+	if pair.Shielded.Tier == "" {
+		t.Error("shielded should report a tier (primary/fallback/cache)")
+	}
+	if pair.Raw.Tier != "" {
+		t.Errorf("raw should not report a tier, got %q", pair.Raw.Tier)
+	}
+	if pair.DurationMS <= 0 {
+		t.Error("duration_ms should be > 0")
+	}
+}
+
+// TestCompare_WithDegradeMode is the regression test for round-2 backend
+// finding M-3: pre-fix Compare's raw side called a.fallback (unwrapped
+// chat provider), so degrade mode left the raw response good and the
+// demo had no contrast. Post-fix raw calls a.primary (DegradedWrapper),
+// so degrade poisons the raw side while shielded routes around it.
+func TestCompare_WithDegradeMode(t *testing.T) {
+	srv := mockOllama(t, false)
+	defer srv.Close()
+
+	a := agent.NewWithOllamaURL(srv.URL)
+	a.EnableDegradeMode()
+	defer a.DisableDegradeMode()
+
+	pair := a.Compare(context.Background(), "explain channels")
+
+	// Raw side should reflect the degraded output. degraded responses
+	// always contain the "as an ai" / "i cannot" / "lorem ipsum" markers
+	// or have a length anomaly, so quality should score low.
+	if pair.Raw.QualityScore >= 0.5 {
+		t.Errorf("raw quality should be low under degrade mode, got %.2f",
+			pair.Raw.QualityScore)
+	}
+	// Shielded routes to fallback after the semantic gate fires, so its
+	// tier should reflect that fact (fallback or, on a cold mock, primary
+	// before the semantic CB calibrates).
+	if pair.Shielded.Text == "" && pair.Shielded.Error == "" {
+		t.Error("shielded must yield either text or an error message")
+	}
+}
+
+// TestCompare_ConcurrentCallsDoNotRace covers QA's highest-ROI ask: prove
+// Compare() is safe under concurrent traffic. Race detector picks up any
+// shared-state mutation across the goroutines spawned per call.
+func TestCompare_ConcurrentCallsDoNotRace(t *testing.T) {
+	srv := mockOllama(t, false)
+	defer srv.Close()
+
+	a := agent.NewWithOllamaURL(srv.URL)
+	done := make(chan struct{}, 3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			a.Compare(context.Background(), "ping")
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < 3; i++ {
+		<-done
+	}
+}

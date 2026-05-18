@@ -138,14 +138,20 @@ func newAgent(cfg *config.Config, log *slog.Logger) *Agent {
 		} else {
 			// Keep an Ollama embedder available so the cache and quality
 			// evaluator still work; cost stays at zero unless caller opts in.
+			// cfg.Models.Embedding flows through as the model name.
 			embedProvider = provider.NewOllama(config.ProviderConfig{
-				Kind:    "ollama",
-				BaseURL: "http://localhost:11434",
-				Timeout: cfg.Provider.Timeout,
+				Kind:       "ollama",
+				BaseURL:    "http://localhost:11434",
+				EmbedModel: cfg.Models.Embedding,
+				Timeout:    cfg.Provider.Timeout,
 			})
 		}
 	default: // "ollama" or empty
-		ol := provider.NewOllama(cfg.Provider)
+		// Forward cfg.Models.Embedding so the operator can swap the embedder
+		// model (e.g. mxbai-embed-large) without touching code.
+		olCfg := cfg.Provider
+		olCfg.EmbedModel = cfg.Models.Embedding
+		ol := provider.NewOllama(olCfg)
 		chatProvider = ol
 		embedProvider = ol
 	}
@@ -453,10 +459,14 @@ func (a *Agent) Compare(ctx context.Context, prompt string) ComparePair {
 
 	go func() {
 		t := time.Now()
-		// Bypass the DegradedWrapper and all flowguard layers — talk
-		// directly to the chat provider. The fallback field on Agent is
-		// the unwrapped chatProvider, so we reuse it here.
-		r, err := a.fallback.Generate(ctx, provider.Request{
+		// Use a.primary (the DegradedWrapper around the chat provider) so
+		// that the chaos demo's degrade-mode toggle still affects this
+		// "raw" call — that's the whole point of the comparison. We do
+		// NOT go through flowguard (no CB, no retry, no hedge, no semantic
+		// gate), so this represents "what the LLM hands back if you call
+		// it directly." When degrade is on, that's garbage; AgentShield's
+		// shielded side then visibly out-performs.
+		r, err := a.primary.Generate(ctx, provider.Request{
 			Model:  a.primaryModel,
 			Prompt: prompt,
 		})
@@ -478,7 +488,10 @@ func (a *Agent) Compare(ctx context.Context, prompt string) ComparePair {
 		LatencyMS: s.dur.Milliseconds(),
 	}
 	if s.err != nil {
-		pair.Shielded.Error = s.err.Error()
+		// Scrub the raw error string — it can contain internal URLs and
+		// upstream provider URLs. Log full detail server-side via slog.
+		a.log.Warn("compare shielded call failed", "err", s.err)
+		pair.Shielded.Error = "shielded call failed"
 	} else if s.resp.Text != "" {
 		pair.Shielded.QualityScore = eval.Evaluate(ctx, prompt, s.resp.Text).Score
 	}
@@ -488,7 +501,8 @@ func (a *Agent) Compare(ctx context.Context, prompt string) ComparePair {
 		LatencyMS: r.dur.Milliseconds(),
 	}
 	if r.err != nil {
-		pair.Raw.Error = r.err.Error()
+		a.log.Warn("compare raw call failed", "err", r.err)
+		pair.Raw.Error = "raw call failed"
 	} else if r.text != "" {
 		pair.Raw.QualityScore = eval.Evaluate(ctx, prompt, r.text).Score
 	}
@@ -591,10 +605,12 @@ func (a *Agent) Status() Status {
 	return s
 }
 
-// Ping checks if Ollama is reachable.
+// Ping checks if the primary LLM provider is reachable. The error string
+// uses the provider's own Name() so /health/ready output reflects whatever
+// backend is actually configured (ollama / openai / groq / ...).
 func (a *Agent) Ping(ctx context.Context) error {
 	if err := a.primary.Ping(ctx); err != nil {
-		return fmt.Errorf("ollama unreachable: %w", err)
+		return fmt.Errorf("%s provider unreachable: %w", a.primary.Name(), err)
 	}
 	return nil
 }
