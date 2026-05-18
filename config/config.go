@@ -142,12 +142,15 @@ func Defaults() *Config {
 			Embedding: "nomic-embed-text",
 		},
 		Limits: LimitsConfig{
-			MaxPromptBytes:      32 * 1024,
-			ToolTimeout:         10 * time.Second,
-			InteractiveSlots:    20,
-			BatchSlots:          5,
-			LoadshedStart:       50,
-			LoadshedWindow:      5 * time.Second,
+			MaxPromptBytes: 32 * 1024,
+			ToolTimeout:    10 * time.Second,
+			InteractiveSlots: 20,
+			BatchSlots:       5,
+			LoadshedStart:    50,
+			// LoadshedWindow must sit above normal LLM latency, otherwise every
+			// healthy call triggers AIMD multiplicative decrease. llama3.2 takes
+			// 5–15s on a Mac; 30s leaves headroom for true overload signals.
+			LoadshedWindow:      30 * time.Second,
 			PrimaryCBWindow:     20,
 			PrimaryCBErrorRate:  0.5,
 			FallbackCBThreshold: 3,

@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-const defaultSimilarityThreshold = 0.92
+const (
+	defaultSimilarityThreshold = 0.92
+	defaultMaxEntries          = 1024
+)
 
 type cacheEntry struct {
 	prompt    string
@@ -24,19 +27,41 @@ type Embedder func(ctx context.Context, text string) ([]float64, error)
 // SemanticCache stores responses and retrieves them by semantic similarity.
 // Falls back to exact SHA-256 match when the embedder is unavailable.
 type SemanticCache struct {
-	mu        sync.RWMutex
-	entries   []cacheEntry
-	ttl       time.Duration
-	embedder  Embedder
-	threshold float64
+	mu         sync.RWMutex
+	entries    []cacheEntry
+	ttl        time.Duration
+	embedder   Embedder
+	threshold  float64
+	maxEntries int
 }
 
-func New(ttl time.Duration, embedder Embedder) *SemanticCache {
-	return &SemanticCache{
-		ttl:       ttl,
-		embedder:  embedder,
-		threshold: defaultSimilarityThreshold,
+// Option configures a SemanticCache.
+type Option func(*SemanticCache)
+
+// WithThreshold sets the cosine-similarity threshold for a cache hit (0–1).
+// Default 0.92. Lower values produce more hits but more spurious matches.
+func WithThreshold(t float64) Option {
+	return func(c *SemanticCache) { c.threshold = t }
+}
+
+// WithMaxEntries caps the total number of stored entries. When the cache is
+// full, prune() evicts oldest-by-expiry entries to make room. Default 1024.
+// Zero disables the cap (not recommended in production).
+func WithMaxEntries(n int) Option {
+	return func(c *SemanticCache) { c.maxEntries = n }
+}
+
+func New(ttl time.Duration, embedder Embedder, opts ...Option) *SemanticCache {
+	c := &SemanticCache{
+		ttl:        ttl,
+		embedder:   embedder,
+		threshold:  defaultSimilarityThreshold,
+		maxEntries: defaultMaxEntries,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // TestCache exposes the internal cache for testing.
@@ -161,15 +186,23 @@ func (c *SemanticCache) Size() int {
 	return len(c.entries)
 }
 
-// prune removes expired entries. Must be called with lock held.
-// Zeros the tail so GC can collect strings and embedding slices in
-// pruned entries (filter-in-place otherwise keeps them reachable).
+// prune removes expired entries and enforces maxEntries. Must be called
+// with lock held. Zeros the tail so GC can collect strings and embedding
+// slices in pruned entries (filter-in-place otherwise keeps them reachable).
 func (c *SemanticCache) prune() {
 	now := time.Now()
 	live := c.entries[:0]
 	for _, e := range c.entries {
 		if !now.After(e.expiresAt) {
 			live = append(live, e)
+		}
+	}
+	// Cap size: evict oldest-by-expiry until under the limit. Without this,
+	// adversarial unique-prompt traffic grows the cache without bound.
+	if c.maxEntries > 0 && len(live) >= c.maxEntries {
+		excess := len(live) - c.maxEntries + 1
+		if excess > 0 && excess <= len(live) {
+			live = live[excess:]
 		}
 	}
 	for i := len(live); i < len(c.entries); i++ {

@@ -87,6 +87,9 @@ type Agent struct {
 	lifeCtx        context.Context
 	lifeCancel     context.CancelFunc
 	log            *slog.Logger
+	cfg            *config.Config
+	primaryModel   string
+	fallbackModel  string
 	primary   provider.LLMProvider
 	fallback  provider.LLMProvider
 	embedder  provider.Embedder
@@ -103,55 +106,66 @@ type Agent struct {
 	totalRequests  atomic.Int64
 }
 
-func newAgent(ollamaURL string, log *slog.Logger) *Agent {
+func newAgent(cfg *config.Config, log *slog.Logger) *Agent {
 	if log == nil {
 		log = slog.Default()
 	}
 	log = log.With(slog.String(logkeys.Component, "agent"))
 
-	ol := provider.NewOllama(config.ProviderConfig{
-		Kind:    "ollama",
-		BaseURL: ollamaURL,
-		Timeout: 60 * time.Second,
-	})
+	primaryModel := cfg.Models.Primary
+	if primaryModel == "" {
+		primaryModel = ModelPrimary
+	}
+	fallbackModel := cfg.Models.Fallback
+	if fallbackModel == "" {
+		fallbackModel = ModelFallback
+	}
+
+	ol := provider.NewOllama(cfg.Provider)
 	// Wrap primary in DegradedWrapper so chaos demo can inject low-quality
 	// responses without taking the backend down. Fallback is NOT wrapped —
 	// chaos affects primary only.
 	degraded := provider.NewDegradedWrapper(ol)
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	a := &Agent{
-		lifeCtx:    lifeCtx,
-		lifeCancel: lifeCancel,
-		log:        log,
-		primary:    degraded,
-		fallback:   ol,
-		embedder:   ol,
-		chaos: orchestrator.NewChaos(degraded),
+		lifeCtx:       lifeCtx,
+		lifeCancel:    lifeCancel,
+		log:           log,
+		cfg:           cfg,
+		primaryModel:  primaryModel,
+		fallbackModel: fallbackModel,
+		primary:       degraded,
+		fallback:      ol,
+		embedder:      ol,
+		chaos:         orchestrator.NewChaos(degraded),
 
 		// Bulkheads: limit concurrent requests per priority class.
-		interactiveBH: bulkhead.New(20, bulkhead.WithMaxWait(2*time.Second)),
-		batchBH:       bulkhead.New(5, bulkhead.WithMaxWait(0)),
+		// Interactive callers wait up to 2s for a slot; batch callers fail fast.
+		interactiveBH: bulkhead.New(cfg.Limits.InteractiveSlots, bulkhead.WithMaxWait(2*time.Second)),
+		batchBH:       bulkhead.New(cfg.Limits.BatchSlots, bulkhead.WithMaxWait(0)),
 
-		// Loadshed: adaptive AIMD — starts at 50 concurrent, shrinks under load.
-		shedder: loadshed.New(50, 5*time.Second),
+		// Loadshed: adaptive AIMD — shrinks limit on calls slower than
+		// LoadshedWindow. For LLM workloads this should be tuned well above
+		// typical model latency, otherwise normal calls trigger shrinkage.
+		shedder: loadshed.New(cfg.Limits.LoadshedStart, cfg.Limits.LoadshedWindow),
 	}
 	a.telemetry = telemetry.NewStore()
-	a.memory = memory.NewStore(60)
+	a.memory = memory.NewStore(cfg.Score.HistorySize)
 
 	pt := circuitbreaker.NewAdaptive(
-		20, 0.5, 5,
+		cfg.Limits.PrimaryCBWindow, cfg.Limits.PrimaryCBErrorRate, 5,
 		circuitbreaker.WithOpenTimeout(15*time.Second),
 		circuitbreaker.WithSuccessThreshold(2),
 	)
 	ft := circuitbreaker.New(
-		circuitbreaker.WithFailureThreshold(3),
+		circuitbreaker.WithFailureThreshold(cfg.Limits.FallbackCBThreshold),
 		circuitbreaker.WithOpenTimeout(30*time.Second),
 	)
 	ps := quality.NewSemanticBreaker(quality.DefaultSBConfig).
 		WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
 			a.telemetry.Webhook.Fire(telemetry.WebhookEvent{
 				Event:      fmt.Sprintf("semantic_cb_%s", next),
-				Model:      ModelPrimary,
+				Model:      primaryModel,
 				PrevState:  string(prev),
 				NewState:   string(next),
 				Reason:     reason,
@@ -169,7 +183,7 @@ func newAgent(ollamaURL string, log *slog.Logger) *Agent {
 	}).WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
 		a.telemetry.Webhook.Fire(telemetry.WebhookEvent{
 			Event:      fmt.Sprintf("semantic_cb_%s", next),
-			Model:      ModelFallback,
+			Model:      fallbackModel,
 			PrevState:  string(prev),
 			NewState:   string(next),
 			Reason:     reason,
@@ -180,24 +194,30 @@ func newAgent(ollamaURL string, log *slog.Logger) *Agent {
 	a.breakers = orchestrator.NewBreakerSet(pt, ft, ps, fs)
 
 	eval := quality.NewEvaluator(a.embedder.Embed)
-	a.cache = cache.New(10*time.Minute, a.embedder.Embed)
+	a.cache = cache.New(
+		cfg.Cache.TTL, a.embedder.Embed,
+		cache.WithMaxEntries(cfg.Cache.MaxEntries),
+		cache.WithThreshold(cfg.Cache.SimilarityThreshold),
+	)
 	a.tools = newToolRegistry(a)
 
-	// Hedge: if primary model hasn't responded in 1.5s, fire a duplicate.
-	hedger := hedge.New(1500*time.Millisecond, hedge.WithMaxHedges(1))
+	// Hedge: if primary hasn't responded within HedgeDelay, fire a duplicate.
+	hedger := hedge.New(cfg.Limits.HedgeDelay, hedge.WithMaxHedges(1))
 
 	a.orch = orchestrator.New(orchestrator.Config{
 		Log:           log,
 		Primary:       a.primary,
 		Fallback:      a.fallback,
-		PrimaryModel:  ModelPrimary,
-		FallbackModel: ModelFallback,
+		PrimaryModel:  primaryModel,
+		FallbackModel: fallbackModel,
 		Breakers:      a.breakers,
 		Hedger:        hedger,
 		Eval:          eval,
 		Cache:         a.cache,
 		Telemetry:     a.telemetry,
 		Chaos:         a.chaos,
+		RetryMax:      cfg.Limits.RetryMax,
+		RetryBackoff:  cfg.Limits.RetryBaseBackoff,
 	})
 	return a
 }
@@ -217,12 +237,15 @@ func New() *Agent {
 // NewWithConfig creates an Agent from an explicit Config and logger.
 // Preferred form for production wiring. If log is nil, slog.Default() is used.
 func NewWithConfig(cfg *config.Config, log *slog.Logger) *Agent {
-	return newAgent(cfg.Provider.BaseURL, log)
+	return newAgent(cfg, log)
 }
 
 // NewWithOllamaURL creates an Agent for testing — no background cleanup goroutines.
+// Builds a Defaults() config with the given Ollama URL.
 func NewWithOllamaURL(url string) *Agent {
-	a := newAgent(url, slog.Default())
+	cfg := config.Defaults()
+	cfg.Provider.BaseURL = url
+	a := newAgent(cfg, slog.Default())
 	a.cache = cache.New(10*time.Minute, nil)
 	// Replace stores with test variants that don't start background goroutines.
 	a.memory.Traces = memory.NewTestTraceStore()
