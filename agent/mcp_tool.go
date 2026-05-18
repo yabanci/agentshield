@@ -41,10 +41,11 @@ type MCPLookupTool struct {
 	client *http.Client
 }
 
-// NewMCPLookupTool returns the tool only if mcpURL is non-empty. Empty
-// URL = MCP integration disabled; the registry simply doesn't register
-// the tool and the ReAct system prompt omits it. This keeps the default
-// (no MCP) experience identical to before so existing tests don't break.
+// NewMCPLookupTool builds a tool bound to mcpURL. The constructor always
+// returns a usable struct — the empty-URL gate is enforced inside Execute
+// (which returns "MCP not configured" so a stray invocation can't crash
+// a ReAct loop). The registry layer is what skips registering the tool
+// when MCP_URL is unset, keeping the default ReAct prompt unchanged.
 func NewMCPLookupTool(mcpURL string) *MCPLookupTool {
 	return &MCPLookupTool{
 		url: mcpURL,

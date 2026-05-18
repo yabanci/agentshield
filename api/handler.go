@@ -86,12 +86,13 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /demo/compare", h.ipLimiter.compareMiddleware(h.compare))
 
 	// Demo controls. Each endpoint wraps requireAuth in the per-IP compare
-	// rate limiter (10/min). When AGENTSHIELD_AUTH_TOKEN is set the token
-	// check is authoritative; when it's unset (recommended only for LOCAL
-	// recording), the rate limit is the defense — a curl loop can't keep
-	// state in kill+degrade forever. Combined with the non-resetting
-	// auto-restore in orchestrator/chaos.go an adversary's blast radius
-	// is one kill per ~6 seconds, fully restored after 5 minutes.
+	// rate limiter (10/min, sliding window). When AGENTSHIELD_AUTH_TOKEN
+	// is set the token check is authoritative; when it's unset (recommended
+	// only for LOCAL recording), the rate limit caps the adversary at 10
+	// kills/minute from any one IP. Sliding-window allows a small burst
+	// rather than a strict tarpit. Combined with the non-resetting
+	// auto-restore in orchestrator/chaos.go the worst-case interruption
+	// is 5 minutes regardless of subsequent kills.
 	mux.HandleFunc("POST /demo/kill", h.ipLimiter.compareMiddleware(h.requireAuth(h.killPrimary)))
 	mux.HandleFunc("POST /demo/restore", h.ipLimiter.compareMiddleware(h.requireAuth(h.restorePrimary)))
 	mux.HandleFunc("POST /demo/kill-fallback", h.ipLimiter.compareMiddleware(h.requireAuth(h.killFallback)))

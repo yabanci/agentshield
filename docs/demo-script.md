@@ -167,6 +167,39 @@ Record each scene 2-3 times, pick the cleanest, hard-cut between them. Smoother 
 
 ---
 
+### Scene 4c — MCP failure mode (1:50 → 2:05, OPTIONAL extension)
+
+The TrueFoundry brief names three failure modes (LLM down, brownout,
+**MCP server erroring out**). Scenes 4 and 4b cover the first two; this
+optional cutaway hits the third explicitly in case judges score on the
+literal three-of-three.
+
+**Pre-record setup (cut from the take):**
+```
+go run ./cmd/mcp-mock              # terminal 3, listens on 127.0.0.1:8081
+MCP_URL=http://localhost:8081 /tmp/agentshield   # restart with MCP wired in
+```
+
+**[CAM]** Switch to terminal. Two curls:
+```
+curl -X POST localhost:8080/react -d '{"prompt":"Use mcp_lookup for the weather in Berlin"}'
+# Berlin: 18°C partly cloudy
+curl -X POST localhost:8081/mcp/kill    # MCP starts erroring
+curl -X POST localhost:8080/react -d '{"prompt":"Use mcp_lookup for Paris"}'
+curl -X POST localhost:8080/react -d '{"prompt":"Use mcp_lookup for Tokyo"}'
+curl -X POST localhost:8080/react -d '{"prompt":"Use mcp_lookup for Madrid"}'    # tool CB open, ReAct rejects without hitting the dead server
+```
+
+**[OST]** `Third failure mode — MCP outage → tool CB → graceful skip`
+
+**[VO]**
+> "MCP is the standard tool protocol everyone's adopting. When an MCP
+> server goes down, AgentShield's per-tool circuit breaker trips after
+> three failures and short-circuits the ReAct loop — the agent simply
+> tells you the tool is unavailable instead of hanging the request."
+
+---
+
 ### Scene 5 — Quality-gated streaming (1:35 → 1:55)
 
 **[CAM]** Click `📡 Stream` mode. Click `🧪 Enable Degrade` again.

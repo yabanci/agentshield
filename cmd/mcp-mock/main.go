@@ -40,7 +40,21 @@ func main() {
 	if port == "" {
 		port = "8081"
 	}
+	// Default to loopback. The mock exposes /mcp/kill + /mcp/restore with
+	// NO authentication — binding 0.0.0.0 on a shared host (VPS, dev k8s,
+	// laptop on conference WiFi) would publish the kill switch. Operators
+	// who genuinely need external access set MCP_MOCK_BIND explicitly and
+	// get a warning in the logs.
+	bind := os.Getenv("MCP_MOCK_BIND")
+	if bind == "" {
+		bind = "127.0.0.1"
+	}
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" {
+		log.Warn("mcp-mock binding to non-loopback address — /mcp/kill is exposed without auth",
+			"bind", bind, "remedy", "set MCP_MOCK_BIND=127.0.0.1 unless you really need this")
+	}
 
 	var killed atomic.Bool
 
@@ -92,12 +106,12 @@ func main() {
 	})
 
 	srv := &http.Server{
-		Addr:         ":" + port,
+		Addr:         bind + ":" + port,
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
-	log.Info("mcp-mock listening", "addr", "http://localhost:"+port,
+	log.Info("mcp-mock listening", "addr", "http://"+bind+":"+port,
 		"endpoints", "GET /health, GET /mcp/status, POST /mcp/{call,kill,restore}")
 	if err := srv.ListenAndServe(); err != nil {
 		log.Error("server error", "err", err)
