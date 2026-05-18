@@ -74,6 +74,10 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health/ready", h.healthReady)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
+	// Compare — fires shielded + raw concurrently. Rate-limited but not
+	// auth-gated; the visible value of the comparison IS the demo.
+	mux.HandleFunc("POST /demo/compare", h.ipLimiter.middleware(h.compare))
+
 	// Demo controls (auth-gated when AGENTSHIELD_AUTH_TOKEN is set)
 	mux.HandleFunc("POST /demo/kill", h.requireAuth(h.killPrimary))
 	mux.HandleFunc("POST /demo/restore", h.requireAuth(h.restorePrimary))
@@ -326,6 +330,23 @@ func (h *Handler) enableDegrade(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) disableDegrade(w http.ResponseWriter, r *http.Request) {
 	h.agent.DisableDegradeMode()
 	jsonOK(w, map[string]string{"result": "degrade mode OFF — primary restored"})
+}
+
+func (h *Handler) compare(w http.ResponseWriter, r *http.Request) {
+	var req chatRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, MaxPromptBytes+1024)).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if code, msg, ok := validatePrompt(req.Prompt); !ok {
+		jsonError(w, msg, code)
+		return
+	}
+	// Compare can take ~2x normal latency because both sides run; give it
+	// the same upper bound as /chat to keep behavior predictable.
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	jsonOK(w, h.agent.Compare(ctx, req.Prompt))
 }
 
 func (h *Handler) startChaos(w http.ResponseWriter, r *http.Request) {

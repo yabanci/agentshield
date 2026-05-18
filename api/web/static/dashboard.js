@@ -677,6 +677,98 @@ window.showTrace = showTrace;
 
 function scoreGradeClass(n){if(n>=90)return'green';if(n>=75)return'blue';if(n>=60)return'yellow';return'red';}
 function scoreColor(n){if(n>=90)return'#6ee7b7';if(n>=75)return'#93c5fd';if(n>=60)return'#fcd34d';return'#fca5a5';}
+// runCompare fires POST /demo/compare and renders both sides in the panel.
+// Built entirely via DOM API so server-returned text can never inject HTML
+// — same threat model as showTrace().
+async function runCompare(){
+  const prompt = document.getElementById('prompt').value.trim();
+  if(!prompt){ alert('Type a prompt first.'); return; }
+  const out = document.getElementById('compare-result');
+  out.textContent = '';
+  out.style.display = 'block';
+  const loading = document.createElement('div');
+  loading.style.cssText = 'font-size:11px;color:#9ca3af;padding:8px';
+  loading.textContent = 'Running both sides in parallel… (up to 90s)';
+  out.appendChild(loading);
+
+  let res;
+  try {
+    res = await fetch('/demo/compare', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({prompt}),
+    }).then(r => r.json());
+  } catch(e) {
+    out.textContent = '';
+    const err = document.createElement('div');
+    err.style.cssText = 'color:#fca5a5;font-size:11px;padding:8px';
+    err.textContent = 'Compare failed: ' + e.message;
+    out.appendChild(err);
+    return;
+  }
+
+  out.textContent = '';
+  const grid = document.createElement('div');
+  grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px';
+
+  grid.appendChild(buildCompareSide('🛡️ Shielded', res.shielded, '#22c55e'));
+  grid.appendChild(buildCompareSide('🪤 Raw', res.raw, '#ef4444'));
+  out.appendChild(grid);
+
+  const foot = document.createElement('div');
+  foot.style.cssText = 'font-size:10px;color:#6b7280;margin-top:6px;text-align:right';
+  foot.textContent = 'Total ' + (res.duration_ms||0) + 'ms (both ran concurrently)';
+  out.appendChild(foot);
+}
+
+function buildCompareSide(title, side, color){
+  const box = document.createElement('div');
+  box.style.cssText = 'border:1px solid '+color+'55;border-radius:6px;padding:10px;background:#0a0c14';
+
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px';
+  const titleEl = document.createElement('span');
+  titleEl.style.cssText = 'font-size:12px;font-weight:600;color:'+color;
+  titleEl.textContent = title;
+  const lat = document.createElement('span');
+  lat.style.cssText = 'font-size:10px;color:#9ca3af';
+  lat.textContent = (side.latency_ms || 0) + 'ms';
+  header.append(titleEl, lat);
+  box.append(header);
+
+  const meta = document.createElement('div');
+  meta.style.cssText = 'display:flex;gap:6px;font-size:10px;color:#6b7280;margin-bottom:6px;flex-wrap:wrap';
+  if (side.tier) {
+    const tierTag = document.createElement('span');
+    tierTag.style.cssText = 'background:#1f2937;color:#9ca3af;padding:2px 6px;border-radius:4px';
+    tierTag.textContent = 'tier: ' + side.tier;
+    meta.appendChild(tierTag);
+  }
+  if (side.quality_score != null) {
+    const qTag = document.createElement('span');
+    const q = side.quality_score;
+    const qc = q >= 0.7 ? '#22c55e' : (q >= 0.45 ? '#f59e0b' : '#ef4444');
+    qTag.style.cssText = 'background:'+qc+'22;color:'+qc+';padding:2px 6px;border-radius:4px';
+    qTag.textContent = 'quality: ' + Math.round(q*100) + '%';
+    meta.appendChild(qTag);
+  }
+  if (side.cached) {
+    const c = document.createElement('span');
+    c.style.cssText = 'background:#7c3aed22;color:#a78bfa;padding:2px 6px;border-radius:4px';
+    c.textContent = 'cached';
+    meta.appendChild(c);
+  }
+  if (meta.children.length) box.append(meta);
+
+  const text = document.createElement('div');
+  text.style.cssText = 'font-size:11px;color:#e2e8f0;background:#111827;padding:8px;border-radius:4px;max-height:180px;overflow-y:auto;white-space:pre-wrap;font-family:inherit';
+  text.textContent = side.error ? ('ERROR: ' + side.error) : (side.text || '(empty)');
+  box.append(text);
+
+  return box;
+}
+window.runCompare = runCompare;
+
 function logClass(t){return t==='degraded'?'le2':t!=='primary'?'lw':'';}
 // log appends a text-only log line. msg is treated as plain text — never HTML.
 function log(msg,cls){
