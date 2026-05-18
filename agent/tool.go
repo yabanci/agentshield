@@ -200,6 +200,12 @@ func evalExpr(s string) (float64, error) {
 	if p.err != nil {
 		return 0, p.err
 	}
+	// Reject trailing garbage: "2+3 BOGUS" used to return 5.0 with no
+	// error because parseExpr stopped at the first non-operator token.
+	p.skipWS()
+	if p.pos < len(p.input) {
+		return 0, fmt.Errorf("unexpected trailing input: %q", string(p.input[p.pos:]))
+	}
 	return v, nil
 }
 

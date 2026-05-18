@@ -109,36 +109,57 @@ type LatencySnapshot struct {
 	ByTier map[string]TierLatency `json:"by_tier"`
 }
 
-func (l *LatencyTracker) tierBreakdown(tier Tier) TierLatency {
+// tierBreakdownLocked computes P50/P95/P99/Samples for a tier with the
+// caller's lock already held. Keeps all four values from the same window
+// snapshot so a concurrent Record() can't make Samples disagree with the
+// percentiles.
+func (l *LatencyTracker) tierBreakdownLocked(tier Tier) TierLatency {
+	w, ok := l.windows[tier]
+	if !ok {
+		return TierLatency{}
+	}
+	n := latencyWindowSize
+	if !l.filled[tier] {
+		n = l.idx[tier]
+	}
+	if n == 0 {
+		return TierLatency{}
+	}
+	cp := make([]time.Duration, n)
+	copy(cp, w[:n])
+	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
+	pct := func(p int) int64 {
+		rank := (n * p) / 100
+		if rank >= n {
+			rank = n - 1
+		}
+		return cp[rank].Milliseconds()
+	}
 	return TierLatency{
-		P50MS:   l.P50(tier),
-		P95MS:   l.P95(tier),
-		P99MS:   l.P99(tier),
-		Samples: l.samples(tier),
+		P50MS:   pct(50),
+		P95MS:   pct(95),
+		P99MS:   pct(99),
+		Samples: n,
 	}
 }
 
-func (l *LatencyTracker) samples(tier Tier) int {
+// Snapshot returns a consistent view of per-tier latency under a single
+// lock acquisition so percentile values and sample counts never disagree
+// with each other (round-2 audit H-2).
+func (l *LatencyTracker) Snapshot() LatencySnapshot {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if _, ok := l.windows[tier]; !ok {
-		return 0
-	}
-	if l.filled[tier] {
-		return latencyWindowSize
-	}
-	return l.idx[tier]
-}
-
-func (l *LatencyTracker) Snapshot() LatencySnapshot {
+	primary := l.tierBreakdownLocked(TierPrimary)
+	fallback := l.tierBreakdownLocked(TierFallback)
+	cache := l.tierBreakdownLocked(TierCache)
 	return LatencySnapshot{
-		PrimaryP95MS:  l.P95(TierPrimary),
-		FallbackP95MS: l.P95(TierFallback),
-		CacheP95MS:    l.P95(TierCache),
+		PrimaryP95MS:  primary.P95MS,
+		FallbackP95MS: fallback.P95MS,
+		CacheP95MS:    cache.P95MS,
 		ByTier: map[string]TierLatency{
-			string(TierPrimary):  l.tierBreakdown(TierPrimary),
-			string(TierFallback): l.tierBreakdown(TierFallback),
-			string(TierCache):    l.tierBreakdown(TierCache),
+			string(TierPrimary):  primary,
+			string(TierFallback): fallback,
+			string(TierCache):    cache,
 		},
 	}
 }
