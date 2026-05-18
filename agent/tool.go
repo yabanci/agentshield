@@ -43,6 +43,12 @@ func newToolRegistry(a *Agent) *ToolRegistry {
 	r.register(&GetTimeTool{})
 	r.register(&SearchDocsTool{})
 	r.register(&CheckSystemTool{agent: a})
+	// Only register the MCP tool when MCP_URL is configured. Empty URL
+	// keeps the default ReAct prompt unchanged so the existing tool
+	// suite still works without an MCP server in the deployment.
+	if a.cfg != nil && a.cfg.MCP.URL != "" {
+		r.register(NewMCPLookupTool(a.cfg.MCP.URL))
+	}
 	return r
 }
 

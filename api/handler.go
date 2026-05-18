@@ -85,15 +85,21 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	// /chat (10/min vs 60/min) because each call costs 2x LLM + 6x embed.
 	mux.HandleFunc("POST /demo/compare", h.ipLimiter.compareMiddleware(h.compare))
 
-	// Demo controls (auth-gated when AGENTSHIELD_AUTH_TOKEN is set)
-	mux.HandleFunc("POST /demo/kill", h.requireAuth(h.killPrimary))
-	mux.HandleFunc("POST /demo/restore", h.requireAuth(h.restorePrimary))
-	mux.HandleFunc("POST /demo/kill-fallback", h.requireAuth(h.killFallback))
-	mux.HandleFunc("POST /demo/restore-fallback", h.requireAuth(h.restoreFallback))
-	mux.HandleFunc("POST /demo/chaos", h.requireAuth(h.startChaos))
-	mux.HandleFunc("GET /demo/chaos/stream", h.requireAuth(h.chaosStream))
-	mux.HandleFunc("POST /demo/degrade", h.requireAuth(h.enableDegrade))
-	mux.HandleFunc("POST /demo/restore-quality", h.requireAuth(h.disableDegrade))
+	// Demo controls. Each endpoint wraps requireAuth in the per-IP compare
+	// rate limiter (10/min). When AGENTSHIELD_AUTH_TOKEN is set the token
+	// check is authoritative; when it's unset (recommended only for LOCAL
+	// recording), the rate limit is the defense — a curl loop can't keep
+	// state in kill+degrade forever. Combined with the non-resetting
+	// auto-restore in orchestrator/chaos.go an adversary's blast radius
+	// is one kill per ~6 seconds, fully restored after 5 minutes.
+	mux.HandleFunc("POST /demo/kill", h.ipLimiter.compareMiddleware(h.requireAuth(h.killPrimary)))
+	mux.HandleFunc("POST /demo/restore", h.ipLimiter.compareMiddleware(h.requireAuth(h.restorePrimary)))
+	mux.HandleFunc("POST /demo/kill-fallback", h.ipLimiter.compareMiddleware(h.requireAuth(h.killFallback)))
+	mux.HandleFunc("POST /demo/restore-fallback", h.ipLimiter.compareMiddleware(h.requireAuth(h.restoreFallback)))
+	mux.HandleFunc("POST /demo/chaos", h.ipLimiter.compareMiddleware(h.requireAuth(h.startChaos)))
+	mux.HandleFunc("GET /demo/chaos/stream", h.ipLimiter.compareMiddleware(h.requireAuth(h.chaosStream)))
+	mux.HandleFunc("POST /demo/degrade", h.ipLimiter.compareMiddleware(h.requireAuth(h.enableDegrade)))
+	mux.HandleFunc("POST /demo/restore-quality", h.ipLimiter.compareMiddleware(h.requireAuth(h.disableDegrade)))
 
 	// Auth discovery for the dashboard
 	mux.HandleFunc("GET /auth/required", h.authRequired)
@@ -430,6 +436,25 @@ func (h *Handler) getTrace(w http.ResponseWriter, r *http.Request) {
 	tr := h.agent.GetTrace(id)
 	if tr == nil {
 		jsonError(w, "trace not found", http.StatusNotFound)
+		return
+	}
+	// When AGENTSHIELD_AUTH_TOKEN is unset, requireAuth on this route is a
+	// no-op and any visitor with a trace ID can pull the verbatim prompt.
+	// Trace IDs flow back in every /chat /react /demo/compare response and
+	// into the dashboard event log, so a shoulder-surf on the demo screen
+	// exfiltrates user prompts. Strip Prompt for unauthed callers; full
+	// trace (including Prompt) is available only when a token gated entry.
+	if !h.AuthEnabled() {
+		// Build a flat view by hand — Trace embeds a sync.Mutex so
+		// `safe := *tr` would copy the lock (go vet refuses that).
+		jsonOK(w, map[string]any{
+			"id":         tr.ID,
+			"prompt":     "", // scrubbed
+			"total_ms":   tr.TotalMS,
+			"final_tier": tr.FinalTier,
+			"steps":      tr.Steps,
+			"created_at": tr.CreatedAt,
+		})
 		return
 	}
 	jsonOK(w, tr)

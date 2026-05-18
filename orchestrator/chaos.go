@@ -43,16 +43,25 @@ func NewChaos(degradedPrimary *provider.DegradedWrapper) *Chaos {
 	return &Chaos{degradedPrimary: degradedPrimary}
 }
 
-// scheduleAutoRestore swaps the named timer for a fresh one that fires
-// `restore` after chaosAutoRestoreTimeout. Calling Kill* twice resets
-// the clock; Restore* cancels.
+// scheduleAutoRestore arms a NON-RESETTING timer that fires `restore`
+// after chaosAutoRestoreTimeout. If a timer is already pending for this
+// slot, the call is a no-op — this is the critical safety property: an
+// attacker spamming /demo/kill in a loop cannot keep state poisoned past
+// the original timer's deadline by re-arming it. The timer clears its
+// own slot when it fires so a future kill (after the restore) can arm
+// a fresh one.
 func (c *Chaos) scheduleAutoRestore(slot **time.Timer, restore func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if *slot != nil {
-		(*slot).Stop()
+		return // pending — keep the original deadline
 	}
-	*slot = time.AfterFunc(chaosAutoRestoreTimeout, restore)
+	*slot = time.AfterFunc(chaosAutoRestoreTimeout, func() {
+		c.mu.Lock()
+		*slot = nil
+		c.mu.Unlock()
+		restore()
+	})
 }
 
 func (c *Chaos) cancelTimer(slot **time.Timer) {

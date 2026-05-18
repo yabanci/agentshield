@@ -21,6 +21,14 @@ type Config struct {
 	Cache     CacheConfig
 	Webhook   WebhookConfig
 	Score     ScoreConfig
+	MCP       MCPConfig
+}
+
+// MCPConfig wires the optional 5th ReAct tool to an external MCP server.
+// URL empty = MCP integration disabled (default). When set, the ReAct
+// prompt grows by one tool (mcp_lookup) and per-tool CB protects it.
+type MCPConfig struct {
+	URL string
 }
 
 type LoggerConfig struct {

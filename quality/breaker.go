@@ -223,11 +223,15 @@ func (sb *SemanticBreaker) calibrate() {
 		std = 0.05
 	}
 
-	// Thresholds: mean ± 1σ and mean ± 2σ, floored to sane minimums.
-	// Enforce failing < degraded with a minimum gap of 0.10 to prevent
-	// both collapsing to the same value on highly-uniform samples.
-	degraded := math.Max(0.40, mean-1.0*std)
-	failing := math.Max(0.20, mean-2.0*std)
+	// Thresholds: mean ± 1σ and mean ± 2σ, then clamped to [floor, ceiling].
+	// Floor (0.40 / 0.20) keeps thresholds from collapsing toward zero.
+	// Ceiling (0.80 / 0.60) defends against calibration-poisoning attacks:
+	// an adversary who pre-seeds the calibration window with 20 hand-crafted
+	// high-quality responses (mean ≈ 0.99) would otherwise tighten degraded
+	// to 0.94, tripping the breaker on legitimate ~0.80 production output.
+	// The ceiling caps how aggressive the learned thresholds can become.
+	degraded := math.Min(0.80, math.Max(0.40, mean-1.0*std))
+	failing := math.Min(0.60, math.Max(0.20, mean-2.0*std))
 	if degraded-failing < 0.10 {
 		failing = math.Max(0.10, degraded-0.15)
 	}

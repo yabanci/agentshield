@@ -2,6 +2,8 @@ module github.com/yabanci/agentshield
 
 go 1.24
 
+toolchain go1.26.3
+
 require github.com/yabanci/flowguard v0.3.0
 
 require (

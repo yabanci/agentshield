@@ -15,6 +15,7 @@
 - **One unique idea**: a circuit breaker that opens on **LLM quality degradation** (looping, refusal-leak, off-topic), not on transport errors. No other resilience library catches an HTTP 200 with garbage. See [Semantic Circuit Breaker](#semantic-circuit-breaker).
 - **One demo button to click**: 🧪 **Enable Degrade** on the dashboard, then 🧪 **Run Compare** to see shielded vs raw side by side. The contrast is the value-prop.
 - **One env var for hosted backends**: `LLM_PROVIDER=openai` + `OPENAI_API_KEY` and the same resilience stack runs against OpenAI / Groq / OpenRouter / vLLM. See [Quick Start](#quick-start).
+- **All three TrueFoundry failure modes covered**: LLM down → transport CB + fallback tier; LLM brownout → semantic CB (the unique angle); MCP server erroring → per-tool CB on `mcp_lookup` with bundled `cmd/mcp-mock/` to demo it.
 - **It's a real codebase**: 12 domain packages, race-clean under `-race -count=10`, six rounds of multi-agent audit closed ~75 findings.
 
 ---
@@ -147,6 +148,38 @@ Built-in tools (no external APIs):
 | `get_time` | Current time in any timezone |
 | `search_docs` | Searches embedded resilience knowledge base |
 | `check_system` | Returns live AgentShield metrics |
+| `mcp_lookup` ★ | Calls an external [MCP server](https://modelcontextprotocol.io/) (`weather`, `currency`, etc.). Registered when `MCP_URL` is set. |
+
+★ = closes the TrueFoundry brief's third failure mode (MCP server erroring out).
+
+### MCP integration
+
+`mcp_lookup` is wired through the same per-tool circuit breaker as the
+built-in tools, so an erroring MCP server degrades gracefully instead of
+hanging ReAct loops. Bundled with a tiny mock server at
+`cmd/mcp-mock/` for demos:
+
+```bash
+# Terminal 1 — fake MCP server with /mcp/kill + /mcp/restore toggles
+go run ./cmd/mcp-mock                         # listens on :8081
+
+# Terminal 2 — AgentShield wired against it
+MCP_URL=http://localhost:8081 go run .
+
+# Ask the agent to use it
+curl -X POST localhost:8080/react -d '{"prompt": "Use mcp_lookup to get the weather in Berlin"}'
+
+# Now simulate MCP failure — the tool's CB opens after 3 errors
+curl -X POST localhost:8081/mcp/kill
+curl -X POST localhost:8080/react -d '{"prompt": "Use mcp_lookup for Berlin"}'    # CB closed: tries, fails
+curl -X POST localhost:8080/react -d '{"prompt": "Use mcp_lookup for Paris"}'      # 2nd failure
+curl -X POST localhost:8080/react -d '{"prompt": "Use mcp_lookup for Tokyo"}'      # 3rd: CB opens
+curl -X POST localhost:8080/react -d '{"prompt": "Use mcp_lookup for Madrid"}'     # CB rejects without calling MCP
+```
+
+Point `MCP_URL` at any real MCP server (Anthropic's reference impl, fastmcp,
+or your own) and the same resilience guarantees apply — the CB wraps the
+HTTP boundary, not anything spec-specific.
 
 ---
 
@@ -319,6 +352,7 @@ go run .
 | `OPENAI_PRIMARY_MODEL` | `gpt-4o-mini` | Chat model when in openai mode |
 | `OPENAI_FALLBACK_MODEL` | `gpt-4o-mini` | Fallback chat model |
 | `OPENAI_EMBED_MODEL` | (empty) | If set, embeddings go through OpenAI; else local Ollama |
+| `MCP_URL` | (empty) | When set, registers the `mcp_lookup` ReAct tool against this MCP server. Use `http://localhost:8081` with the bundled `cmd/mcp-mock/` |
 | `AGENTSHIELD_AUTH_TOKEN` | (empty) | Bearer token. Gates `/demo/*`, `/sessions/*`, `/trace/{id}`, `/config/webhook` when set |
 | `AGENTSHIELD_ALLOW_HTTP_WEBHOOK` | `false` | Allow `http://` webhook destinations |
 | `AGENTSHIELD_ALLOW_PRIVATE_WEBHOOK` | `false` | Allow webhook URLs resolving to private/loopback IPs |
