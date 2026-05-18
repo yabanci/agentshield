@@ -2,7 +2,10 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
+	"syscall"
 	"time"
 
 	"github.com/yabanci/flowguard/hedge"
@@ -210,6 +213,12 @@ func (o *Orchestrator) tryPrimary(ctx context.Context, prompt string, tr *memory
 			r := retry.New(
 				retry.WithMaxRetries(o.retryMax),
 				retry.WithExponentialBackoff(o.retryBackoff),
+				// Skip retry on connection refused / DNS not-found — retrying
+				// can't bring the provider back, and the backoff just stretches
+				// graceful-denial latency. Round-11 smoke test caught this:
+				// pre-fix, an Ollama-down state burned ~900ms in primary-tier
+				// retries before falling through to fallback.
+				retry.WithRetryIf(isRetriable),
 			)
 			return r.Do(ctx, func(ctx context.Context) error {
 				text, err := o.generate(ctx, o.primaryModel, prompt)
@@ -320,4 +329,22 @@ func (o *Orchestrator) generate(ctx context.Context, model, prompt string) (stri
 		return "", err
 	}
 	return r.Text, nil
+}
+
+// isRetriable returns false for errors that retrying can't recover from in
+// the timeframe of a single request — connection-refused, no-such-host.
+// The transport CB still observes these failures, so a sustained outage
+// will trip the CB and short-circuit subsequent requests entirely.
+func isRetriable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return false
+	}
+	return true
 }

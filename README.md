@@ -1,5 +1,11 @@
 # AgentShield
 
+[![CI](https://github.com/yabanci/agentshield/actions/workflows/ci.yml/badge.svg)](https://github.com/yabanci/agentshield/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/yabanci/agentshield)](https://goreportcard.com/report/github.com/yabanci/agentshield)
+[![Go Reference](https://pkg.go.dev/badge/github.com/yabanci/agentshield.svg)](https://pkg.go.dev/github.com/yabanci/agentshield)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Security: 11 audit rounds](https://img.shields.io/badge/security%20audits-11%20rounds-brightgreen)](./SECURITY.md)
+
 > 🏆 **Submission for the [TrueFoundry Resilient Agents Challenge](https://devnetwork-ai-ml-hack-2026.devpost.com/) — DevNetwork AI+ML Hackathon 2026**
 
 **An LLM returns HTTP 200. The content is garbage. No existing circuit breaker catches it. AgentShield does.**

@@ -152,7 +152,7 @@ Record each scene 2-3 times, pick the cleanest, hard-cut between them. Smoother 
 
 ---
 
-### Scene 4b — Chaos demo, the sparkline (1:25 → 2:20)
+### Scene 4b — Chaos demo, the sparkline (1:50 → 2:20)
 
 **[CAM]** Click `✅ Restore Quality`. Click `▶ Run Chaos Demo`.
 

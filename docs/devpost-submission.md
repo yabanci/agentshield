@@ -11,10 +11,12 @@
 
 **Your LLM returned HTTP 200. The output is garbage. Now what?**
 
-(Interrogative — interrupts the gallery scroll; implies a problem the
-reader has personally hit. Alternates:
-- _"The first circuit breaker that opens on LLM quality degradation, not transport errors."_
-- _"Catches the HTTP 200 with garbage — so you don't ship it."_)
+<!-- Alternates kept for the gallery-layout case — DO NOT PASTE into the
+     final Devpost field. Only the bold line above goes in.
+       - "The first circuit breaker that opens on LLM quality degradation, not transport errors."
+       - "Catches the HTTP 200 with garbage — so you don't ship it."
+-->
+
 
 ---
 
@@ -32,11 +34,11 @@ Two breakers per model run independently:
 - **Transport CB** — classic, trips on 5xx / timeouts.
 - **Semantic CB** — five-signal quality evaluator (repetition trigrams, length anomaly, refusal markers, prompt-coherence via embeddings, language mismatch) feeds a rolling window with adaptive `mean ± σ` calibration. When the rolling avg drops below the failing threshold, the breaker opens — even though every response was HTTP 200.
 
-Above that: bulkhead + AIMD load shedder + hedged requests (P95-style) + retry with backoff + 4-tier fallback (primary → fallback model → semantic embedding cache → graceful denial) + per-tool circuit breaker on a ReAct agent.
+In plain terms: when the model misbehaves, requests are automatically rerouted to a cheaper fallback model and served from a semantic cache before the user is ever told the system is unavailable. For engineers, the layers stacked above the semantic CB are: bulkhead + AIMD load shedder + hedged requests (P95-style) + retry with backoff + 4-tier fallback (primary → fallback model → semantic embedding cache → graceful denial), plus a per-tool circuit breaker on a ReAct agent.
 
 The TrueFoundry brief names three failure modes — **LLM down**, **LLM brownout**, **MCP server erroring**. AgentShield handles all three: transport CB + fallback tier for the first, semantic CB for the second (the unique one), per-tool CB on the bundled `mcp_lookup` ReAct tool for the third.
 
-A single dashboard shows the **Resilience Score** (5 × 20 = 100, components: Transport / Quality / Cache / Availability / Latency), a side-by-side **shielded vs raw compare**, a live **latency histogram** (p50 / p95 / p99 per tier), a **flame-trace timeline** for every request, and an automated **chaos demo** that drops the score 100 → 41 → back to 95 in under a minute.
+A single dashboard shows the **Resilience Score** (5 × 20 = 100, components: Transport / Quality / Cache / Availability / Latency), a side-by-side **shielded vs raw compare**, a live **latency histogram** (p50 / p95 / p99 per tier), a **flame-trace timeline** for every request, and an automated **chaos demo** that drops the score 100 → 41 → 78 → 95 in under a minute.
 
 ---
 
@@ -67,8 +69,8 @@ Threats from an adversarial round 8: a malicious visitor on a public live URL co
 - **The semantic CB is genuinely novel** for this hackathon track — every other resilience library opens on transport.
 - **All three TrueFoundry failure modes covered explicitly** — LLM down (transport CB + fallback), LLM brownout (semantic CB), MCP erroring (per-tool CB with bundled mock for the demo).
 - **Multi-provider abstraction** — the same resilience stack runs against Ollama, OpenAI, Groq, OpenRouter, vLLM. One env var.
-- **10 audit rounds, ~100 findings closed**, including 4 stdlib CVEs (XSS escaper bypass in `html/template` reachable via the dashboard template path, closed by toolchain bump to go1.26.3). The audit logs and reports are in the repo at `docs/superpowers/`.
-- **Race-clean test suite** at `go test -race -count=20`. Sustained-load stress + fuzz tests.
+- **~100 findings surfaced and resolved through ten rounds of multi-agent security and correctness audit**, including 4 stdlib CVEs (XSS escaper bypass in `html/template` reachable via the dashboard template path, closed by toolchain bump to go1.26.3). The audit reports are in the repo at `docs/superpowers/`.
+- **Race-clean test suite** at `go test -race -count=10`. Sustained-load stress + fuzz tests.
 
 ---
 
@@ -85,7 +87,7 @@ A surprising amount of resilience design is **demo design**. The chaos scenario,
 - **OpenTelemetry trace propagation** to outbound LLM/MCP calls so cross-service spans connect.
 - **Grafana dashboard JSON + Prometheus alert rules** shipped alongside the Helm chart.
 - **Tool-cache and conversation summarization** for ReAct sessions over 20 messages.
-- **Real factual-accuracy detector** (entailment-based) as an optional sixth quality signal for use cases where structural-degradation detection isn't enough.
+- **Pluggable factual-accuracy detector** as an optional add-on for use cases where the in-scope structural degradation detection isn't enough — keeping the core scope honest and the heavier checks opt-in.
 - **Bench against LangChain + langchain-resilience** to publish a head-to-head.
 
 ---
