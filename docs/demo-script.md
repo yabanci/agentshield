@@ -1,7 +1,9 @@
 # AgentShield — Demo Video Script
 
 **Target:** Devpost submission for the [TrueFoundry Resilient Agents Challenge](https://devnetwork-ai-ml-hack-2026.devpost.com/)
-**Length:** 2:00 ± 0:10 (Devpost sweet spot — judges watch many submissions)
+**Length:** 2:50 ± 0:15 (raised from the 2:00 target after round-10
+timing audit — Ollama inference + flame trace render need real seconds.
+If the hackathon caps at 3:00, trim Scene 5 streaming as the optional cut.)
 **Format:** 1080p screen recording, system audio off (use VO), 30fps
 **Tone:** confident senior engineer, not breathless marketer. Pause for emphasis. Let the dashboard do the talking.
 
@@ -87,7 +89,7 @@ Record each scene 2-3 times, pick the cleanest, hard-cut between them. Smoother 
 
 ---
 
-### Scene 2 — Normal request, the happy path (0:12 → 0:32)
+### Scene 2 — Normal request, the happy path (0:12 → 0:45)
 
 **[CAM]** Click the prompt input. Type `What is Go in three sentences?` Hit Cmd+Enter.
 
@@ -106,7 +108,7 @@ Record each scene 2-3 times, pick the cleanest, hard-cut between them. Smoother 
 
 ---
 
-### Scene 3 — The killer moment (0:32 → 1:05)
+### Scene 3 — The killer moment (0:45 → 1:25)
 
 **[CAM]** Cursor moves to `🧪 Enable Degrade` button. Click.
 
@@ -133,7 +135,7 @@ Record each scene 2-3 times, pick the cleanest, hard-cut between them. Smoother 
 
 ---
 
-### Scene 4 — Side-by-side, the value-prop in one click (1:05 → 1:25)
+### Scene 4 — Side-by-side, the value-prop in one click (1:25 → 1:50)
 
 **[CAM]** Type one more prompt: `What is a goroutine?`. Click `⚖️ Run Compare`.
 
@@ -150,7 +152,7 @@ Record each scene 2-3 times, pick the cleanest, hard-cut between them. Smoother 
 
 ---
 
-### Scene 4b — Chaos demo, the sparkline (1:25 → 1:50)
+### Scene 4b — Chaos demo, the sparkline (1:25 → 2:20)
 
 **[CAM]** Click `✅ Restore Quality`. Click `▶ Run Chaos Demo`.
 
@@ -200,7 +202,7 @@ curl -X POST localhost:8080/react -d '{"prompt":"Use mcp_lookup for Madrid"}'   
 
 ---
 
-### Scene 5 — Quality-gated streaming (1:35 → 1:55)
+### Scene 5 — Quality-gated streaming (2:20 → 2:40)
 
 **[CAM]** Click `📡 Stream` mode. Click `🧪 Enable Degrade` again.
 
@@ -217,7 +219,7 @@ curl -X POST localhost:8080/react -d '{"prompt":"Use mcp_lookup for Madrid"}'   
 
 ---
 
-### Scene 6 — Code reveal + close (1:55 → 2:10)
+### Scene 6 — Code reveal + close (2:40 → 2:55)
 
 **[CUT]** Quick switch to Tab 2 (GitHub repo).
 
@@ -235,7 +237,7 @@ curl -X POST localhost:8080/react -d '{"prompt":"Use mcp_lookup for Madrid"}'   
 >
 > AgentShield adds the semantic layer on top.
 >
-> Production-grade Go, eleven packages, ninety-nine percent test coverage on the hot path. Zero external service dependencies for the resilience logic. Drop-in middleware."
+> Twelve cohesive Go packages, race-clean test suite, ten rounds of multi-agent audit closed roughly one hundred findings. Zero external service dependencies for the resilience logic. Drop-in middleware."
 
 **[CUT]** End card (static, 4s):
 
@@ -317,6 +319,6 @@ Avoid:
 
 ## 8. The 30-second elevator-pitch script (Devpost tagline section)
 
-> "Traditional circuit breakers catch HTTP failures. LLMs fail differently — they stay up while serving garbage. AgentShield is the first resilience middleware with a Semantic Circuit Breaker that opens on quality degradation, not just transport errors. Two breakers per model, independent. Five-component Resilience Score. Quality-gated streaming. Production-grade Go, drop-in middleware."
+> "Traditional circuit breakers catch HTTP failures. LLMs fail differently — they stay up while serving garbage. AgentShield is the first resilience middleware with a Semantic Circuit Breaker that opens on quality degradation, not just transport errors. Two breakers per model, independent. Five-component Resilience Score. Quality-gated streaming. Drop-in Go middleware, ten audit rounds deep."
 
 (110 words. Cut to 80 if Devpost has a tagline word limit.)
