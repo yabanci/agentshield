@@ -42,6 +42,12 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	if cfg.AuthToken == "" {
+		logger.Warn("AGENTSHIELD_AUTH_TOKEN is unset — /demo/*, /sessions/*, " +
+			"/trace/*, and /config/webhook are open to anonymous callers. " +
+			"Required in any deployment a third party can reach.")
+	}
+
 	go func() {
 		logger.Info("AgentShield started", "addr", "http://localhost:"+cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

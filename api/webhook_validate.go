@@ -14,7 +14,13 @@ import (
 //   - non-http(s) schemes (file://, gopher://, etc.)
 //   - http:// unless cfg.Webhook.AllowHTTP is true
 //   - private/loopback IPs unless cfg.Webhook.AllowPrivate is true
+//   - hostnames that resolve to any private/loopback IP at validation time
 //   - hosts that fail to parse
+//
+// DNS rebinding caveat: a bypass remains where a hostname resolves to a
+// public IP at validation time and then to a private IP when the webhook
+// fires. The HTTP dispatcher must apply the same isLoopbackOrPrivateIP
+// check on the resolved IP at request time to fully close that gap.
 func validateWebhookURL(raw string, cfg *config.Config) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -40,16 +46,38 @@ func validateWebhookURL(raw string, cfg *config.Config) error {
 	return nil
 }
 
+// isLoopbackOrPrivate accepts either an IP literal or a hostname. For
+// hostnames it performs a DNS lookup and rejects if any resolved address
+// is in a private/loopback/link-local/unspecified range. The pre-fix
+// version returned false for any hostname, allowing trivial SSRF: register
+// attacker.example.com pointing at 169.254.169.254 (cloud IMDS) and the
+// validator passes.
 func isLoopbackOrPrivate(host string) bool {
 	host = strings.ToLower(host)
 	if host == "localhost" || host == "host.docker.internal" {
 		return true
 	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		// Hostname; we can't resolve safely without leaking via DNS.
-		// For a stricter check, callers should resolve and re-validate.
-		return false
+	if ip := net.ParseIP(host); ip != nil {
+		return ipIsLoopbackOrPrivate(ip)
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
+	// Hostname — resolve and reject if ANY answer is private.
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		// Resolution failure: be defensive and reject. A webhook that can't
+		// resolve at validation time isn't useful anyway, and accepting it
+		// would only paper over the bypass.
+		return true
+	}
+	for _, ip := range ips {
+		if ipIsLoopbackOrPrivate(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func ipIsLoopbackOrPrivate(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsMulticast()
 }

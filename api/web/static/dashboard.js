@@ -104,12 +104,31 @@ async function doChat(prompt){
     document.getElementById('resp-box').textContent=data.text;
     showTier(data.tier,data.cached,0,data.trace_id);
     tierCounts[data.tier]=(tierCounts[data.tier]||0)+1; updateDonut();
-    const traceLink = data.trace_id ? ' [<a href="javascript:showTrace(\''+data.trace_id+'\')" style="color:#93c5fd;text-decoration:none">trace↗</a>]' : '';
-    document.getElementById('log').innerHTML='<div class="le '+logClass(data.tier)+'">['+new Date().toLocaleTimeString()+'] ← '+tierEmoji(data.tier)+' '+data.tier+(data.cached?' (cached)':'')+traceLink+'</div>'+document.getElementById('log').innerHTML;
+    prependLog(data.tier, '← '+tierEmoji(data.tier)+' '+data.tier+(data.cached?' (cached)':''), data.trace_id);
   }catch(e){
     document.getElementById('resp-box').textContent='Error: '+e.message;
     log('✗ '+e.message,'le2');
   }
+}
+
+// prependLog builds a log entry with textContent so server-controlled
+// fields cannot inject HTML. Replaces the older innerHTML concatenation.
+function prependLog(tier, message, traceId){
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = 'le ' + logClass(tier);
+  line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + message;
+  if (traceId) {
+    line.appendChild(document.createTextNode(' '));
+    const a = document.createElement('a');
+    a.href = '#';
+    a.style.color = '#93c5fd';
+    a.style.textDecoration = 'none';
+    a.textContent = '[trace↗]';
+    a.addEventListener('click', (ev) => { ev.preventDefault(); showTrace(traceId); });
+    line.appendChild(a);
+  }
+  el.insertBefore(line, el.firstChild);
 }
 
 async function doReact(prompt){
@@ -426,7 +445,14 @@ function showTier(tier,cached,turns,traceId){
   else turnsB.style.display='none';
   const traceB=document.getElementById('trace-badge');
   if(traceId && traceB){
-    traceB.innerHTML='<a href="javascript:showTrace(\''+traceId+'\')" style="color:#93c5fd;text-decoration:none">📋 trace</a>';
+    traceB.textContent = '';
+    const a = document.createElement('a');
+    a.href = '#';
+    a.style.color = '#93c5fd';
+    a.style.textDecoration = 'none';
+    a.textContent = '📋 trace';
+    a.addEventListener('click', (ev) => { ev.preventDefault(); showTrace(traceId); });
+    traceB.append(a);
     traceB.style.display='inline';
   } else if(traceB) traceB.style.display='none';
 }
@@ -461,8 +487,10 @@ function drawSparkline(points){
   ctx.fill();
 }
 
-// Auth: prompt for token if /auth/required says so; cache in localStorage.
-let _authToken = localStorage.getItem('agentshield-auth') || '';
+// Auth: prompt for token if /auth/required says so. Held in a closure
+// variable; never persisted to localStorage so an XSS payload (or browser
+// extension) on the same origin cannot read it back across reloads.
+let _authToken = '';
 async function ensureAuth(){
   try{
     const r = await fetch('/auth/required');
@@ -471,7 +499,6 @@ async function ensureAuth(){
       const token = prompt('Auth token required for demo controls:');
       if(token){
         _authToken = token;
-        localStorage.setItem('agentshield-auth', token);
       }
     }
   }catch(_){}
@@ -485,49 +512,102 @@ function authFetch(url, opts){
   return fetch(url, opts);
 }
 
-// Trace viewer modal
+// Trace viewer modal — built entirely via DOM API. Every server-controlled
+// field goes through textContent / setAttribute so a prompt that induces
+// HTML in trace fields cannot execute script.
 async function showTrace(traceId){
-  try{
-    const tr = await fetch('/trace/'+traceId).then(r=>r.json());
-    let html = '<div style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center" onclick="this.remove()">';
-    html += '<div style="background:#111827;border:1px solid #374151;border-radius:10px;padding:24px;max-width:700px;max-height:80vh;overflow-y:auto;width:90%" onclick="event.stopPropagation()">';
-    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">';
-    html += '<div><div style="font-size:14px;font-weight:600;color:#f9fafb">Trace '+tr.id+'</div>';
-    html += '<div style="font-size:11px;color:#6b7280">'+tr.total_ms+'ms · final tier: '+tr.final_tier+'</div></div>';
-    html += '<button onclick="this.closest(\'[onclick]\').parentElement.remove()" style="background:#1f2937;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer">×</button>';
-    html += '</div>';
-    html += '<div style="font-size:12px;color:#9ca3af;margin-bottom:12px">Prompt: <span style="color:#e2e8f0">'+escapeHtml(tr.prompt)+'</span></div>';
-    (tr.steps||[]).forEach((s,i)=>{
-      const tierC = {primary:'#3b82f6',fallback:'#d97706',cache:'#7c3aed',degraded:'#dc2626'}[s.tier]||'#6b7280';
-      html += '<div style="border-left:3px solid '+tierC+';padding:10px 12px;margin-bottom:6px;background:#0a0c14;border-radius:6px">';
-      html += '<div style="display:flex;justify-content:space-between"><span style="font-size:13px;font-weight:600">'+tierEmoji(s.tier)+' '+s.tier+'</span>';
-      html += '<span style="font-size:11px;color:#6b7280">'+s.latency_ms+'ms</span></div>';
-      html += '<div style="font-size:11px;color:#9ca3af;margin-top:4px">outcome: <b>'+s.outcome+'</b>';
-      if(s.transport_cb) html += ' · transport: '+s.transport_cb;
-      if(s.semantic_cb) html += ' · semantic: '+s.semantic_cb;
-      if(s.quality_score!=null) html += ' · quality: '+(s.quality_score*100).toFixed(0)+'%';
-      html += '</div>';
-      if(s.quality_signals && s.quality_signals.length){
-        html += '<div style="font-size:10px;color:#fcd34d;margin-top:3px">signals: '+s.quality_signals.join(', ')+'</div>';
-      }
-      html += '</div>';
-    });
-    html += '</div></div>';
-    const div = document.createElement('div');
-    div.innerHTML = html;
-    document.body.appendChild(div.firstChild);
-  }catch(e){alert('failed to load trace: '+e.message);}
+  let tr;
+  try { tr = await fetch('/trace/'+encodeURIComponent(traceId)).then(r=>r.json()); }
+  catch(e) { alert('failed to load trace: '+e.message); return; }
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center';
+  overlay.addEventListener('click', () => overlay.remove());
+
+  const modal = document.createElement('div');
+  modal.style.cssText = 'background:#111827;border:1px solid #374151;border-radius:10px;padding:24px;max-width:700px;max-height:80vh;overflow-y:auto;width:90%';
+  modal.addEventListener('click', (e) => e.stopPropagation());
+
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:14px';
+  const headerLeft = document.createElement('div');
+  const title = document.createElement('div');
+  title.style.cssText = 'font-size:14px;font-weight:600;color:#f9fafb';
+  title.textContent = 'Trace ' + (tr.id || '');
+  const subtitle = document.createElement('div');
+  subtitle.style.cssText = 'font-size:11px;color:#6b7280';
+  subtitle.textContent = (tr.total_ms != null ? tr.total_ms + 'ms · ' : '') + 'final tier: ' + (tr.final_tier || '');
+  headerLeft.append(title, subtitle);
+  const closeBtn = document.createElement('button');
+  closeBtn.style.cssText = 'background:#1f2937;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer';
+  closeBtn.textContent = '×';
+  closeBtn.addEventListener('click', () => overlay.remove());
+  header.append(headerLeft, closeBtn);
+  modal.append(header);
+
+  if (tr.prompt) {
+    const promptRow = document.createElement('div');
+    promptRow.style.cssText = 'font-size:12px;color:#9ca3af;margin-bottom:12px';
+    const promptLabel = document.createTextNode('Prompt: ');
+    const promptSpan = document.createElement('span');
+    promptSpan.style.color = '#e2e8f0';
+    promptSpan.textContent = tr.prompt;
+    promptRow.append(promptLabel, promptSpan);
+    modal.append(promptRow);
+  }
+
+  const tierC = {primary:'#3b82f6', fallback:'#d97706', cache:'#7c3aed', degraded:'#dc2626'};
+  (tr.steps || []).forEach((s) => {
+    const stepBox = document.createElement('div');
+    stepBox.style.cssText = 'border-left:3px solid ' + (tierC[s.tier] || '#6b7280') + ';padding:10px 12px;margin-bottom:6px;background:#0a0c14;border-radius:6px';
+
+    const topRow = document.createElement('div');
+    topRow.style.cssText = 'display:flex;justify-content:space-between';
+    const tierSpan = document.createElement('span');
+    tierSpan.style.cssText = 'font-size:13px;font-weight:600';
+    tierSpan.textContent = tierEmoji(s.tier) + ' ' + (s.tier || '');
+    const latSpan = document.createElement('span');
+    latSpan.style.cssText = 'font-size:11px;color:#6b7280';
+    latSpan.textContent = (s.latency_ms != null ? s.latency_ms + 'ms' : '');
+    topRow.append(tierSpan, latSpan);
+    stepBox.append(topRow);
+
+    const detail = document.createElement('div');
+    detail.style.cssText = 'font-size:11px;color:#9ca3af;margin-top:4px';
+    detail.appendChild(document.createTextNode('outcome: '));
+    const outcomeB = document.createElement('b');
+    outcomeB.textContent = s.outcome || '';
+    detail.appendChild(outcomeB);
+    if (s.transport_cb) detail.appendChild(document.createTextNode(' · transport: ' + s.transport_cb));
+    if (s.semantic_cb)  detail.appendChild(document.createTextNode(' · semantic: ' + s.semantic_cb));
+    if (s.quality_score != null) detail.appendChild(document.createTextNode(' · quality: ' + (s.quality_score*100).toFixed(0) + '%'));
+    stepBox.append(detail);
+
+    if (Array.isArray(s.quality_signals) && s.quality_signals.length) {
+      const sig = document.createElement('div');
+      sig.style.cssText = 'font-size:10px;color:#fcd34d;margin-top:3px';
+      sig.textContent = 'signals: ' + s.quality_signals.join(', ');
+      stepBox.append(sig);
+    }
+    modal.append(stepBox);
+  });
+
+  overlay.append(modal);
+  document.body.append(overlay);
 }
-function escapeHtml(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
 window.showTrace = showTrace;
 
 function scoreGradeClass(n){if(n>=90)return'green';if(n>=75)return'blue';if(n>=60)return'yellow';return'red';}
 function scoreColor(n){if(n>=90)return'#6ee7b7';if(n>=75)return'#93c5fd';if(n>=60)return'#fcd34d';return'#fca5a5';}
 function logClass(t){return t==='degraded'?'le2':t!=='primary'?'lw':'';}
+// log appends a text-only log line. msg is treated as plain text — never HTML.
 function log(msg,cls){
   const el=document.getElementById('log');
   const ts=new Date().toLocaleTimeString();
-  el.innerHTML='<div class="le '+cls+'">['+ts+'] '+msg+'</div>'+el.innerHTML;
+  const line = document.createElement('div');
+  line.className = 'le ' + (cls || '');
+  line.textContent = '[' + ts + '] ' + msg;
+  el.insertBefore(line, el.firstChild);
 }
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 
