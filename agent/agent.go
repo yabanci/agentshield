@@ -195,8 +195,32 @@ func newAgent(cfg *config.Config, log *slog.Logger) *Agent {
 		circuitbreaker.WithFailureThreshold(cfg.Limits.FallbackCBThreshold),
 		circuitbreaker.WithOpenTimeout(30*time.Second),
 	)
+	// logCBTransition emits a structured event for every semantic CB state
+	// change. SREs alerting off logs (not metrics) can pattern-match on
+	// "semantic_cb_state_change" without scraping Prometheus. Severity
+	// climbs with state: degraded → WARN, failing → ERROR.
+	logCBTransition := func(model string, prev, next quality.SBState, reason string, avg float64) {
+		args := []any{
+			slog.String("event", "semantic_cb_state_change"),
+			slog.String("model", model),
+			slog.String("prev_state", string(prev)),
+			slog.String("new_state", string(next)),
+			slog.String("reason", reason),
+			slog.Float64("avg_quality", avg),
+		}
+		switch next {
+		case quality.SBFailing:
+			log.Error("semantic circuit breaker opened (failing)", args...)
+		case quality.SBDegraded:
+			log.Warn("semantic circuit breaker degraded", args...)
+		default:
+			log.Info("semantic circuit breaker recovered", args...)
+		}
+	}
+
 	ps := quality.NewSemanticBreaker(quality.DefaultSBConfig).
 		WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
+			logCBTransition(primaryModel, prev, next, reason, avg)
 			a.telemetry.Webhook.Fire(telemetry.WebhookEvent{
 				Event:      fmt.Sprintf("semantic_cb_%s", next),
 				Model:      primaryModel,
@@ -215,6 +239,7 @@ func newAgent(cfg *config.Config, log *slog.Logger) *Agent {
 		OpenTimeout:       30 * time.Second,
 		RecoverySamples:   2,
 	}).WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
+		logCBTransition(fallbackModel, prev, next, reason, avg)
 		a.telemetry.Webhook.Fire(telemetry.WebhookEvent{
 			Event:      fmt.Sprintf("semantic_cb_%s", next),
 			Model:      fallbackModel,

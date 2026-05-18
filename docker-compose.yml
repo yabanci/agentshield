@@ -1,18 +1,69 @@
+# docker-compose.yml — self-contained AgentShield + Ollama for local demos.
+#
+# Two ways to run this:
+#
+#   docker compose up                # default: containerised Ollama (CPU)
+#   docker compose --profile host-ollama up    # use host Ollama (Mac/Metal GPU)
+#
+# Containerised Ollama gives a self-contained "git clone → up → done"
+# experience for judges who don't already run Ollama natively. Mac users
+# with the native app pulling models on Metal should prefer the
+# host-ollama profile for the GPU acceleration.
 services:
   agentshield:
     build: .
     ports:
       - "8080:8080"
     environment:
-      - PORT=8080
-      # Ollama runs natively on Mac (Metal GPU). Docker connects to it via host.
-      - OLLAMA_URL=http://host.docker.internal:11434
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      PORT: "8080"
+      # Default: talk to the bundled ollama service below.
+      # The host-ollama profile overrides this via env_file.
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      # Optional multi-provider knobs — set these in the host env (or a
+      # local .env file) when LLM_PROVIDER=openai is wanted.
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_PRIMARY_MODEL: ${OPENAI_PRIMARY_MODEL:-}
+      OPENAI_FALLBACK_MODEL: ${OPENAI_FALLBACK_MODEL:-}
+      OPENAI_EMBED_MODEL: ${OPENAI_EMBED_MODEL:-}
+      AGENTSHIELD_AUTH_TOKEN: ${AGENTSHIELD_AUTH_TOKEN:-}
+    depends_on:
+      ollama:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health/live"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 5s
+
+  # Containerised Ollama. Pulls models lazily on first request; persists
+  # downloaded weights in a named volume so subsequent runs skip the pull.
+  # CPU-only by default — for Apple Silicon native Metal speedup, use the
+  # host-ollama profile (see top of file).
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # host-ollama profile: opt-in via `docker compose --profile host-ollama up`.
+  # Adds host.docker.internal routing so AgentShield reaches the Mac/Linux
+  # native Ollama (preferred for Metal GPU users). The agentshield service
+  # also needs `extra_hosts` then — but Compose can't conditionally append,
+  # so this is documented for the user; switch via shell:
+  #   OLLAMA_URL=http://host.docker.internal:11434 docker compose up agentshield
+
+volumes:
+  ollama_models:

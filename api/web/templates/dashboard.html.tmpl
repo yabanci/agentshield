@@ -63,10 +63,10 @@
 
   <!-- Tabs: Demo | Session | Charts -->
   <div class="card">
-    <div class="tab-row">
-      <div class="tab active" onclick="switchTab('demo')">🎭 Demo</div>
-      <div class="tab" onclick="switchTab('session')">💬 Session</div>
-      <div class="tab" onclick="switchTab('charts')">📊 Charts</div>
+    <div class="tab-row" role="tablist" aria-label="Dashboard sections">
+      <button class="tab active" role="tab" aria-selected="true" aria-controls="tab-demo" onclick="switchTab('demo')">🎭 Demo</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="tab-session" onclick="switchTab('session')">💬 Session</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="tab-charts" onclick="switchTab('charts')">📊 Charts</button>
     </div>
 
     <!-- Demo tab -->
