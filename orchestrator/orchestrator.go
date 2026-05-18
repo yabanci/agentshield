@@ -40,6 +40,8 @@ type Orchestrator struct {
 	sc            *cache.SemanticCache
 	tel           *telemetry.Store
 	chaos         *Chaos
+	retryMax      int
+	retryBackoff  time.Duration
 }
 
 // Config bundles Orchestrator dependencies. Pass everything explicitly
@@ -56,6 +58,10 @@ type Config struct {
 	Cache         *cache.SemanticCache
 	Telemetry     *telemetry.Store
 	Chaos         *Chaos
+	// RetryMax and RetryBackoff control the inner retry on primary calls.
+	// Zero values fall back to safe defaults (2 retries, 300ms exponential).
+	RetryMax     int
+	RetryBackoff time.Duration
 }
 
 // New constructs an Orchestrator from its config.
@@ -66,6 +72,14 @@ func New(cfg Config) *Orchestrator {
 		log = slog.Default()
 	}
 	log = log.With(slog.String(logkeys.Component, "orchestrator"))
+	retryMax := cfg.RetryMax
+	if retryMax <= 0 {
+		retryMax = 2
+	}
+	retryBackoff := cfg.RetryBackoff
+	if retryBackoff <= 0 {
+		retryBackoff = 300 * time.Millisecond
+	}
 	return &Orchestrator{
 		log:           log,
 		primary:       cfg.Primary,
@@ -78,6 +92,8 @@ func New(cfg Config) *Orchestrator {
 		sc:            cfg.Cache,
 		tel:           cfg.Telemetry,
 		chaos:         cfg.Chaos,
+		retryMax:      retryMax,
+		retryBackoff:  retryBackoff,
 	}
 }
 
@@ -192,8 +208,8 @@ func (o *Orchestrator) tryPrimary(ctx context.Context, prompt string, tr *memory
 				telemetry.HedgeFiresTotal.Inc()
 			}
 			r := retry.New(
-				retry.WithMaxRetries(2),
-				retry.WithExponentialBackoff(300*time.Millisecond),
+				retry.WithMaxRetries(o.retryMax),
+				retry.WithExponentialBackoff(o.retryBackoff),
 			)
 			return r.Do(ctx, func(ctx context.Context) error {
 				text, err := o.generate(ctx, o.primaryModel, prompt)
@@ -257,22 +273,39 @@ func (o *Orchestrator) tryFallback(ctx context.Context, prompt string, tr *memor
 	}
 
 	var result string
-	err := o.breakers.FallbackTransport.Do(ctx, func(ctx context.Context) error {
+	transportErr := o.breakers.FallbackTransport.Do(ctx, func(ctx context.Context) error {
 		r, err := o.fallback.Generate(ctx, provider.Request{Model: o.fallbackModel, Prompt: prompt})
-		text := r.Text
 		if err != nil {
 			return err
 		}
-		qr := o.eval.Evaluate(ctx, prompt, text)
-		o.breakers.FallbackSemantic.Record(qr.Score, qr)
-		telemetry.QualityGauge.WithLabelValues("fallback").Set(qr.Score)
-		step.QualityScore = &qr.Score
-		step.SemanticCB = string(o.breakers.FallbackSemantic.State())
-		result = text
+		result = r.Text
 		return nil
 	})
-	if err != nil {
+	if transportErr != nil {
 		step.Outcome = memory.OutcomeTransportError
+		step.TransportCB = o.breakers.FallbackTransport.State().String()
+		return "", false
+	}
+
+	// Quality evaluation OUTSIDE the transport CB — symmetric with tryPrimary.
+	// A slow or panicking embedder must not contaminate transport CB state,
+	// and a bad-quality response must not be returned as success.
+	qr := o.eval.Evaluate(ctx, prompt, result)
+	o.breakers.FallbackSemantic.Record(qr.Score, qr)
+	telemetry.QualityGauge.WithLabelValues("fallback").Set(qr.Score)
+
+	step.QualityScore = &qr.Score
+	step.SemanticCB = string(o.breakers.FallbackSemantic.State())
+	if len(qr.Signals) > 0 {
+		names := make([]string, len(qr.Signals))
+		for i, s := range qr.Signals {
+			names[i] = s.Name
+		}
+		step.QualitySignals = names
+	}
+
+	if qr.Score < quality.QualityAcceptable && len(qr.Signals) > 0 {
+		step.Outcome = memory.OutcomeSemanticFailure
 		return "", false
 	}
 	step.Outcome = memory.OutcomeSuccess

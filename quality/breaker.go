@@ -135,11 +135,19 @@ func (sb *SemanticBreaker) Record(score float64, result QualityResult) SBState {
 	sb.lastResult = result
 
 	// Adaptive calibration: collect healthy-looking scores before calibrating.
+	// Only acceptable-quality scores count toward the window — if degrade mode
+	// is enabled before baseline is established, the calibration window simply
+	// doesn't fill and the breaker keeps its default thresholds. Without this
+	// filter, a fresh process whose first 20 calls happen during degrade mode
+	// would calibrate to garbage thresholds and never trip again for the
+	// process lifetime.
 	if !sb.calibration.Calibrated && sb.calibN > 0 {
-		sb.calibSamples = append(sb.calibSamples, score)
-		sb.calibration.SamplesCollected = len(sb.calibSamples)
-		if len(sb.calibSamples) >= sb.calibN {
-			sb.calibrate()
+		if score >= QualityAcceptable {
+			sb.calibSamples = append(sb.calibSamples, score)
+			sb.calibration.SamplesCollected = len(sb.calibSamples)
+			if len(sb.calibSamples) >= sb.calibN {
+				sb.calibrate()
+			}
 		}
 	} else if sb.calibration.Calibrated {
 		// Drift detection: incrementally update long-term mean.
@@ -264,7 +272,9 @@ func (sb *SemanticBreaker) updateState(latestScore float64) {
 		}
 
 	case SBFailing:
-		if latestScore >= sb.cfg.DegradedThreshold {
+		switch {
+		case latestScore >= sb.cfg.DegradedThreshold:
+			// Full-quality probe — count toward recovery.
 			sb.consecutiveGood++
 			if sb.consecutiveGood >= sb.cfg.RecoverySamples {
 				sb.state = SBHealthy
@@ -272,11 +282,17 @@ func (sb *SemanticBreaker) updateState(latestScore float64) {
 				sb.consecutiveGood = 0
 				sb.probeInFlight.Store(false) // reset for next trip
 			}
-		} else {
+		case latestScore >= sb.cfg.FailingThreshold:
+			// Mediocre probe (FailingThreshold ≤ score < DegradedThreshold):
+			// quality is improving but not back to baseline. Don't extend
+			// openAt — that would keep the breaker stuck — but don't bump
+			// consecutiveGood either. The next probe is allowed sooner.
+			sb.probeInFlight.Store(false)
+		default:
+			// Bad probe (<FailingThreshold): reset openAt so the next probe
+			// waits the full OpenTimeout. Without this, ShouldBlock() would
+			// allow immediate re-probing after a fast-returning bad result.
 			sb.consecutiveGood = 0
-			// Bad probe: reset openAt so the next probe waits the full
-			// OpenTimeout again. Without this, ShouldBlock() would allow
-			// immediate re-probing after a fast-returning bad result.
 			sb.openAt = time.Now()
 		}
 	}

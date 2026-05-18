@@ -50,7 +50,7 @@ func TestDefaults_Limits(t *testing.T) {
 		{"InteractiveSlots", c.Limits.InteractiveSlots, 20},
 		{"BatchSlots", c.Limits.BatchSlots, 5},
 		{"LoadshedStart", c.Limits.LoadshedStart, 50},
-		{"LoadshedWindow", c.Limits.LoadshedWindow, 5 * time.Second},
+		{"LoadshedWindow", c.Limits.LoadshedWindow, 30 * time.Second},
 		{"PrimaryCBWindow", c.Limits.PrimaryCBWindow, 20},
 		{"PrimaryCBErrorRate", c.Limits.PrimaryCBErrorRate, 0.5},
 		{"FallbackCBThreshold", c.Limits.FallbackCBThreshold, 3},
