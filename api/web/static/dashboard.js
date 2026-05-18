@@ -25,6 +25,37 @@ const lineChart = new Chart(document.getElementById('chart-line').getContext('2d
   },plugins:{legend:{display:false}}}
 });
 
+// Latency-per-tier histogram. Grouped bars: each tier (primary / fallback /
+// cache) gets a p50 / p95 / p99 triplet. Updated on every status refresh
+// so judges watching the chaos demo see latency move tier-by-tier live.
+const latencyData = {
+  labels: ['primary','fallback','cache'],
+  datasets: [
+    {label:'p50',data:[0,0,0],backgroundColor:'#22c55e'},
+    {label:'p95',data:[0,0,0],backgroundColor:'#3b82f6'},
+    {label:'p99',data:[0,0,0],backgroundColor:'#a855f7'},
+  ],
+};
+const latencyChart = new Chart(document.getElementById('chart-latency').getContext('2d'),{
+  type:'bar', data:latencyData,
+  options:{
+    responsive:true,
+    scales:{
+      x:{ticks:{color:'#6b7280',font:{size:10}},grid:{display:false}},
+      y:{ticks:{color:'#4b5563',font:{size:9},callback:v=>v<1000?v+'ms':(v/1000).toFixed(1)+'s'},grid:{color:'#1f293744'},beginAtZero:true},
+    },
+    plugins:{legend:{position:'top',labels:{color:'#9ca3af',font:{size:10},boxWidth:10}}},
+  },
+});
+function updateLatencyChart(byTier){
+  if(!byTier) return;
+  const tiers = ['primary','fallback','cache'];
+  latencyData.datasets[0].data = tiers.map(t=>(byTier[t]?.p50_ms)||0);
+  latencyData.datasets[1].data = tiers.map(t=>(byTier[t]?.p95_ms)||0);
+  latencyData.datasets[2].data = tiers.map(t=>(byTier[t]?.p99_ms)||0);
+  latencyChart.update('none');
+}
+
 function updateDonut(){donutData.datasets[0].data=[tierCounts.primary,tierCounts.fallback,tierCounts.cache,tierCounts.degraded];donut.update('none');}
 function addLinePoint(total){
   const delta=total-lastTotal; lastTotal=total;
@@ -356,6 +387,7 @@ async function refreshStatus(){
     const lat = s.latency||{};
     const p95 = lat.primary_p95_ms||0;
     document.getElementById('score-p95').textContent = p95>0 ? (p95<1000?p95+'ms':(p95/1000).toFixed(1)+'s') : '—';
+    updateLatencyChart(lat.by_tier);
 
     // Drift detection from primary semantic CB calibration
     const driftBadge = document.getElementById('calib-primary');
@@ -557,7 +589,53 @@ async function showTrace(traceId){
   }
 
   const tierC = {primary:'#3b82f6', fallback:'#d97706', cache:'#7c3aed', degraded:'#dc2626'};
-  (tr.steps || []).forEach((s) => {
+  const outcomeC = {
+    success:        '#22c55e',
+    cache_hit:      '#7c3aed',
+    transport_error:'#dc2626',
+    semantic_failure:'#f59e0b',
+    semantic_cb_open:'#f59e0b',
+    killed:         '#6b7280',
+    graceful_denial:'#9ca3af',
+  };
+
+  // Flame timeline strip — each step is a bar whose width is proportional to
+  // step.latency_ms / total_ms. Color by outcome so success / fallback /
+  // semantic_failure / graceful_denial are visually distinct at a glance.
+  const steps = tr.steps || [];
+  if (steps.length > 0) {
+    const flameLabel = document.createElement('div');
+    flameLabel.style.cssText = 'font-size:10px;color:#6b7280;margin:6px 0 4px 0;text-transform:uppercase;letter-spacing:0.5px';
+    flameLabel.textContent = 'Resilience timeline';
+    modal.append(flameLabel);
+
+    const flame = document.createElement('div');
+    flame.style.cssText = 'display:flex;width:100%;height:28px;border-radius:6px;overflow:hidden;background:#0a0c14;margin-bottom:6px;border:1px solid #1f2937';
+
+    const total = Math.max(1, tr.total_ms || steps.reduce((a,s)=>a+(s.latency_ms||0), 0));
+    steps.forEach((s, i) => {
+      const widthPct = Math.max(2, ((s.latency_ms || 0) / total) * 100);
+      const bar = document.createElement('div');
+      bar.style.cssText = 'flex:0 0 '+widthPct.toFixed(2)+'%;background:'+(outcomeC[s.outcome] || tierC[s.tier] || '#6b7280')+';display:flex;align-items:center;justify-content:center;font-size:10px;color:#0a0c14;font-weight:600;cursor:default;border-right:'+(i<steps.length-1?'1px solid #0a0c14':'none');
+      bar.title = (s.tier || '?') + ' · ' + (s.outcome || '?') + ' · ' + (s.latency_ms||0) + 'ms';
+      // Only show the tier emoji if the bar is wide enough; otherwise just a dot.
+      bar.textContent = widthPct > 8 ? tierEmoji(s.tier) : '';
+      flame.append(bar);
+    });
+    modal.append(flame);
+
+    // Tier scale: total duration and final outcome under the bar.
+    const scale = document.createElement('div');
+    scale.style.cssText = 'display:flex;justify-content:space-between;font-size:10px;color:#6b7280;margin-bottom:14px';
+    const left = document.createElement('span');
+    left.textContent = '0ms';
+    const right = document.createElement('span');
+    right.textContent = (tr.total_ms || 0) + 'ms · ended in ' + (tr.final_tier || '?');
+    scale.append(left, right);
+    modal.append(scale);
+  }
+
+  steps.forEach((s) => {
     const stepBox = document.createElement('div');
     stepBox.style.cssText = 'border-left:3px solid ' + (tierC[s.tier] || '#6b7280') + ';padding:10px 12px;margin-bottom:6px;background:#0a0c14;border-radius:6px';
 
