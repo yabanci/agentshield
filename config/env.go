@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 )
 
 // LoadFromEnv builds a Config from defaults, overrides with environment variables,
@@ -89,6 +90,21 @@ func LoadFromEnv() (*Config, error) {
 	}
 	if v := os.Getenv("LOG_FORMAT"); v == "json" || v == "text" {
 		c.Logger.Format = v
+	}
+
+	// OTel — OTEL_EXPORTER_OTLP_ENDPOINT empty means no-op tracer (no export).
+	// OTEL_EXPORTER_OTLP_INSECURE and OTEL_EXPORTER_OTLP_TIMEOUT can still
+	// be set even when endpoint is empty; they're ignored in no-op mode.
+	if v := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); v != "" {
+		c.OTel.Endpoint = v
+	}
+	if os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "false" {
+		c.OTel.Insecure = false
+	}
+	if v := os.Getenv("OTEL_EXPORTER_OTLP_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.OTel.Timeout = d
+		}
 	}
 
 	if err := c.Validate(); err != nil {

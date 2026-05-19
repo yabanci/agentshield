@@ -10,6 +10,8 @@ import (
 
 	"github.com/yabanci/flowguard/hedge"
 	"github.com/yabanci/flowguard/retry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/yabanci/agentshield/cache"
 	"github.com/yabanci/agentshield/internal/logkeys"
@@ -100,6 +102,10 @@ func New(cfg Config) *Orchestrator {
 	}
 }
 
+// tracer is the named tracer for orchestrator spans.
+// Using a package-level var avoids constructing a new tracer on every request.
+var tracer = telemetry.Tracer("agentshield/orchestrator") //nolint:gochecknoglobals // package-level tracer per OTel idiom
+
 // Degrade runs the 4-tier degradation chain, recording each attempt in tr.
 // Returns the final Result. The third return is reserved for future use
 // (currently always nil — failures are encoded as Tier=Degraded).
@@ -108,71 +114,150 @@ func (o *Orchestrator) Degrade(ctx context.Context, prompt string, tr *memory.Tr
 	reqLog := o.log.With(slog.String(logkeys.TraceID, tr.ID))
 
 	// Tier 1: primary model (hedged + transport CB + semantic CB + retry)
-	if text, ok := o.tryPrimary(ctx, prompt, tr); ok {
-		dur := time.Since(start)
-		telemetry.RequestsTotal.WithLabelValues("primary").Inc()
-		telemetry.RequestDuration.WithLabelValues("primary").Observe(dur.Seconds())
-		o.tel.Latency.Record(memory.TierPrimary, dur)
-		o.sc.Set(ctx, prompt, text)
-		o.tel.Costs.Record(memory.TierPrimary, prompt, text)
-		reqLog.Info("tier served",
-			slog.String(logkeys.Tier, string(memory.TierPrimary)),
-			slog.String(logkeys.Outcome, "success"),
-			slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
+	{
+		spanCtx, span := tracer.Start(ctx, "agentshield.tier.primary")
+		span.SetAttributes(
+			attribute.String("tier", "primary"),
+			attribute.String("model", o.primaryModel),
+			attribute.String("cb_state", o.breakers.PrimaryTransport.State().String()),
+			attribute.String("sb_state", string(o.breakers.PrimarySemantic.State())),
 		)
-		return Result{Text: text, Tier: memory.TierPrimary}
+		text, ok := o.tryPrimary(spanCtx, prompt, tr)
+		if ok {
+			dur := time.Since(start)
+			if step := latestStep(tr, memory.TierPrimary); step != nil && step.QualityScore != nil {
+				span.SetAttributes(attribute.Float64("quality.score", *step.QualityScore))
+			}
+			span.End()
+			telemetry.RequestsTotal.WithLabelValues("primary").Inc()
+			telemetry.RequestDuration.WithLabelValues("primary").Observe(dur.Seconds())
+			o.tel.Latency.Record(memory.TierPrimary, dur)
+			o.sc.Set(ctx, prompt, text)
+			o.tel.Costs.Record(memory.TierPrimary, prompt, text)
+			reqLog.Info("tier served",
+				slog.String(logkeys.Tier, string(memory.TierPrimary)),
+				slog.String(logkeys.Outcome, "success"),
+				slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
+			)
+			return Result{Text: text, Tier: memory.TierPrimary}
+		}
+		// Primary failed — mark span error only on transport errors; semantic
+		// failures are expected quality events, not infrastructure errors.
+		if step := latestStep(tr, memory.TierPrimary); step != nil {
+			if step.Outcome == memory.OutcomeTransportError {
+				span.RecordError(errors.New(string(step.Outcome)))
+				span.SetStatus(codes.Error, string(step.Outcome))
+			}
+		}
+		span.End()
 	}
 
 	// Tier 2: fallback model (transport CB + semantic CB)
-	if text, ok := o.tryFallback(ctx, prompt, tr); ok {
-		dur := time.Since(start)
-		telemetry.RequestsTotal.WithLabelValues("fallback").Inc()
-		telemetry.RequestDuration.WithLabelValues("fallback").Observe(dur.Seconds())
-		o.tel.Latency.Record(memory.TierFallback, dur)
-		o.sc.Set(ctx, prompt, text)
-		o.tel.Costs.Record(memory.TierFallback, prompt, text)
-		reqLog.Warn("tier served via fallback",
-			slog.String(logkeys.Tier, string(memory.TierFallback)),
-			slog.String(logkeys.Outcome, "success"),
-			slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
+	{
+		spanCtx, span := tracer.Start(ctx, "agentshield.tier.fallback")
+		span.SetAttributes(
+			attribute.String("tier", "fallback"),
+			attribute.String("model", o.fallbackModel),
+			attribute.String("cb_state", o.breakers.FallbackTransport.State().String()),
+			attribute.String("sb_state", string(o.breakers.FallbackSemantic.State())),
 		)
-		return Result{Text: text, Tier: memory.TierFallback}
+		text, ok := o.tryFallback(spanCtx, prompt, tr)
+		if ok {
+			dur := time.Since(start)
+			if step := latestStep(tr, memory.TierFallback); step != nil && step.QualityScore != nil {
+				span.SetAttributes(attribute.Float64("quality.score", *step.QualityScore))
+			}
+			span.End()
+			telemetry.RequestsTotal.WithLabelValues("fallback").Inc()
+			telemetry.RequestDuration.WithLabelValues("fallback").Observe(dur.Seconds())
+			o.tel.Latency.Record(memory.TierFallback, dur)
+			o.sc.Set(ctx, prompt, text)
+			o.tel.Costs.Record(memory.TierFallback, prompt, text)
+			reqLog.Warn("tier served via fallback",
+				slog.String(logkeys.Tier, string(memory.TierFallback)),
+				slog.String(logkeys.Outcome, "success"),
+				slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
+			)
+			return Result{Text: text, Tier: memory.TierFallback}
+		}
+		if step := latestStep(tr, memory.TierFallback); step != nil {
+			if step.Outcome == memory.OutcomeTransportError {
+				span.RecordError(errors.New(string(step.Outcome)))
+				span.SetStatus(codes.Error, string(step.Outcome))
+			}
+		}
+		span.End()
 	}
 
 	// Tier 3: semantic cache
-	if cached, ok := o.sc.Get(ctx, prompt); ok {
-		dur := time.Since(start)
-		telemetry.RequestsTotal.WithLabelValues("cache").Inc()
-		o.tel.Latency.Record(memory.TierCache, dur)
-		tr.AddStep(memory.TraceStep{
-			Tier: memory.TierCache, Outcome: memory.OutcomeCacheHit,
-			LatencyMS: dur.Milliseconds(),
-		})
-		o.tel.Costs.Record(memory.TierCache, prompt, cached)
-		reqLog.Warn("tier served from semantic cache",
-			slog.String(logkeys.Tier, string(memory.TierCache)),
-			slog.String(logkeys.Outcome, "cache_hit"),
-			slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
-		)
-		return Result{Text: cached, Tier: memory.TierCache, Cached: true}
+	{
+		spanCtx, span := tracer.Start(ctx, "agentshield.tier.cache")
+		span.SetAttributes(attribute.String("tier", "cache"))
+		cached, ok := o.sc.Get(spanCtx, prompt)
+		if ok {
+			dur := time.Since(start)
+			span.SetAttributes(attribute.Bool("cache.hit", true))
+			span.End()
+			telemetry.RequestsTotal.WithLabelValues("cache").Inc()
+			o.tel.Latency.Record(memory.TierCache, dur)
+			tr.AddStep(memory.TraceStep{
+				Tier: memory.TierCache, Outcome: memory.OutcomeCacheHit,
+				LatencyMS: dur.Milliseconds(),
+			})
+			o.tel.Costs.Record(memory.TierCache, prompt, cached)
+			reqLog.Warn("tier served from semantic cache",
+				slog.String(logkeys.Tier, string(memory.TierCache)),
+				slog.String(logkeys.Outcome, "cache_hit"),
+				slog.Int64(logkeys.LatencyMS, dur.Milliseconds()),
+			)
+			return Result{Text: cached, Tier: memory.TierCache, Cached: true}
+		}
+		span.SetAttributes(attribute.Bool("cache.hit", false))
+		span.End()
 	}
 
-	// Tier 4: graceful denial
-	telemetry.RequestsTotal.WithLabelValues("degraded").Inc()
-	tr.AddStep(memory.TraceStep{
-		Tier: memory.TierDegraded, Outcome: memory.OutcomeGracefulDenial,
-		LatencyMS: time.Since(start).Milliseconds(),
-	})
-	o.tel.Costs.Record(memory.TierDegraded, prompt, "")
-	reqLog.Error("all tiers exhausted — graceful denial",
-		slog.String(logkeys.Tier, string(memory.TierDegraded)),
-		slog.String(logkeys.Outcome, "graceful_denial"),
-		slog.Int64(logkeys.LatencyMS, time.Since(start).Milliseconds()),
-	)
-	return Result{
-		Text: "All AI tiers are currently unavailable. Please try again shortly.",
-		Tier: memory.TierDegraded,
+	// Tier 4: graceful denial.
+	// Graceful denial is a SUCCESSFUL response from the user's perspective —
+	// the service handled the request and returned a human-readable message.
+	// We set agentshield.denied=true as an informational attr and do NOT mark
+	// the span as errored so tail-sampling and SLO dashboards don't count it
+	// as a failure (it would inflate error rate while availability is holding).
+	{
+		_, span := tracer.Start(ctx, "agentshield.degrade")
+		span.SetAttributes(
+			attribute.String("tier", "denied"),
+			attribute.Bool("agentshield.denied", true),
+		)
+		defer span.End()
+		telemetry.RequestsTotal.WithLabelValues("degraded").Inc()
+		tr.AddStep(memory.TraceStep{
+			Tier: memory.TierDegraded, Outcome: memory.OutcomeGracefulDenial,
+			LatencyMS: time.Since(start).Milliseconds(),
+		})
+		o.tel.Costs.Record(memory.TierDegraded, prompt, "")
+		reqLog.Error("all tiers exhausted — graceful denial",
+			slog.String(logkeys.Tier, string(memory.TierDegraded)),
+			slog.String(logkeys.Outcome, "graceful_denial"),
+			slog.Int64(logkeys.LatencyMS, time.Since(start).Milliseconds()),
+		)
+		return Result{
+			Text: "All AI tiers are currently unavailable. Please try again shortly.",
+			Tier: memory.TierDegraded,
+		}
 	}
+}
+
+// latestStep returns a pointer to the most recent TraceStep for the given tier,
+// or nil if none exists. Used to read quality scores and outcomes after tryPrimary
+// / tryFallback return so we can attach them to the OTel span.
+func latestStep(tr *memory.Trace, tier memory.Tier) *memory.TraceStep {
+	steps := tr.Steps
+	for i := len(steps) - 1; i >= 0; i-- {
+		if steps[i].Tier == tier {
+			return &steps[i]
+		}
+	}
+	return nil
 }
 
 // tryPrimary uses hedge + transport CB + semantic CB + retry.

@@ -54,6 +54,12 @@ env:
     value_from:
       type: secret
       secret_fqn: "secret:AGENTSHIELD_AUTH_TOKEN"
+  # Optional: distributed tracing via OpenTelemetry.
+  # Set to your OTLP/gRPC collector endpoint to enable flame graphs.
+  # Leave empty (default) for no-op — no spans emitted.
+  #   OTEL_EXPORTER_OTLP_ENDPOINT: "your-collector:4317"
+  #   OTEL_EXPORTER_OTLP_INSECURE: "true"
+  #   OTEL_EXPORTER_OTLP_TIMEOUT: "10s"
 
 # Split probe paths matching the Go server's /health/live (process is up,
 # no dep checks) and /health/ready (LLM provider reachable). Using the

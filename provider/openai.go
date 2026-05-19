@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/yabanci/agentshield/config"
 )
 
@@ -95,8 +97,10 @@ func NewOpenAI(cfg config.ProviderConfig) *OpenAIProvider {
 		timeout = 60 * time.Second
 	}
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")
+	// otelhttp.NewTransport wraps the default transport so OTel client spans
+	// are created and W3C traceparent headers are injected on every outbound call.
 	return &OpenAIProvider{
-		http:        &http.Client{Timeout: timeout},
+		http:        &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport), Timeout: timeout},
 		baseURL:     baseURL,
 		apiKey:      cfg.APIKey,
 		embedModel:  cfg.EmbedModel,

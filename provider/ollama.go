@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/yabanci/agentshield/config"
 )
 
@@ -74,14 +76,18 @@ func NewOllama(cfg config.ProviderConfig) *OllamaProvider {
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 5 * time.Second,
 	}
+	// otelhttp.NewTransport wraps the custom transport as the inner
+	// RoundTripper so the dial timeout is preserved while adding OTel
+	// client-span creation and W3C traceparent header injection.
+	traced := otelhttp.NewTransport(transport)
 	return &OllamaProvider{
-		http: &http.Client{Transport: transport, Timeout: timeout},
+		http: &http.Client{Transport: traced, Timeout: timeout},
 		// streamHTTP is a separate client because streaming has a much longer
 		// upper bound than a non-streaming Generate. Reusing across calls
 		// keeps connections in the pool and avoids the fd leak from
 		// constructing a fresh client on every Stream invocation. Shares
 		// the dial timeout — only the overall request budget differs.
-		streamHTTP: &http.Client{Transport: transport, Timeout: 120 * time.Second},
+		streamHTTP: &http.Client{Transport: traced, Timeout: 120 * time.Second},
 		baseURL:    cfg.BaseURL,
 		embedModel: embedModel,
 	}
