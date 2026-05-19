@@ -387,8 +387,10 @@ func (h *Handler) startChaos(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"result": "chaos scenario started — stream at /demo/chaos/stream"})
 }
 
-// chaosStream streams chaos events via SSE.
-// The client connects, starts chaos via POST /demo/chaos, then watches here.
+// chaosStream streams chaos events via SSE. Connecting here starts the
+// chaos scenario AND streams events back; `POST /demo/chaos` is the
+// alternative non-streaming trigger. Calling both produces 409 because
+// only one scenario runs at a time — dashboards use only this endpoint.
 func (h *Handler) chaosStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -418,7 +420,16 @@ func (h *Handler) chaosStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			data, _ := json.Marshal(event)
+			data, err := json.Marshal(event)
+			if err != nil {
+				// ChaosEvent has only serializable fields today, but a
+				// future signature change must not silently emit blank
+				// SSE frames; surface and bail so the client sees EOF
+				// rather than an opaque hang.
+				h.log.Error("chaos event marshal failed",
+					slog.String("type", event.Type), slog.Any("err", err))
+				return
+			}
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 			if event.Type == "done" {

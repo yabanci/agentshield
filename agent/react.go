@@ -68,20 +68,11 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 	a.memory.Sessions.Add(sessionID, memory.Message{Role: "user", Content: prompt, At: nowFn()})
 
 	for i := 0; i < maxReactIterations; i++ {
-		resp, err := a.degrade(ctx, conversationCtx, tr)
-		if err != nil {
-			tr.Finalize(TierDegraded)
-			return ReactResponse{}, fmt.Errorf("react llm call failed: %w", err)
-		}
+		resp := a.degrade(ctx, conversationCtx, tr)
 		lastTier = resp.Tier
 		raw := strings.TrimSpace(resp.Text)
 
-		step, err := parseReactStep(raw, i+1)
-		if err != nil {
-			steps = append(steps, ReactStep{Iteration: i + 1, Answer: raw})
-			return done(raw, i+1, lastTier), nil
-		}
-
+		step := parseReactStep(raw, i+1)
 		steps = append(steps, step)
 
 		if step.Answer != "" {
@@ -114,8 +105,10 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 }
 
 // parseReactStep parses one LLM output into a ReactStep.
-// Handles variations in formatting that LLMs tend to produce.
-func parseReactStep(raw string, iteration int) (ReactStep, error) {
+// Handles variations in formatting that LLMs tend to produce. Never
+// fails — if the LLM ignored the format entirely, the whole response
+// becomes the Answer (see the bottom of this function).
+func parseReactStep(raw string, iteration int) ReactStep {
 	step := ReactStep{Iteration: iteration}
 	lines := strings.Split(raw, "\n")
 
@@ -134,7 +127,7 @@ func parseReactStep(raw string, iteration int) (ReactStep, error) {
 					step.Answer += " " + next
 				}
 			}
-			return step, nil
+			return step
 		} else if strings.HasPrefix(lower, "action:") && !strings.HasPrefix(lower, "action input") {
 			step.Action = strings.TrimSpace(line[7:])
 			step.Action = strings.Trim(step.Action, "`\"'")
@@ -153,7 +146,7 @@ func parseReactStep(raw string, iteration int) (ReactStep, error) {
 		// Whole response is the answer (LLM skipped format)
 		step.Answer = raw
 	}
-	return step, nil
+	return step
 }
 
 func extractAfterColon(line string) string {
@@ -207,4 +200,4 @@ func buildHistory(messages []memory.Message) string {
 }
 
 // nowFn is overridable in tests.
-var nowFn = func() time.Time { return time.Now() } //nolint:gochecknoglobals
+var nowFn = time.Now //nolint:gochecknoglobals

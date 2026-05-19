@@ -381,9 +381,11 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 			bh = a.batchBH
 		}
 		return bh.Do(ctx, func(ctx context.Context) error {
-			var bhErr error
-			resp, bhErr = a.degrade(ctx, prompt, tr)
-			return bhErr
+			// degrade always returns a usable Response — graceful denial
+			// is itself a response, not an error. The error path here is
+			// reserved for future hard-fail signals from the orchestrator.
+			resp = a.degrade(ctx, prompt, tr)
+			return nil
 		})
 	})
 
@@ -413,18 +415,20 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 }
 
 // degrade delegates to Orchestrator. Kept as a method on Agent so react.go
-// can call it without taking an Orchestrator parameter.
-func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (Response, error) {
+// can call it without taking an Orchestrator parameter. Cannot fail —
+// graceful-denial is itself a Response with Tier=TierDegraded, not an error.
+func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) Response {
 	r := a.orch.Degrade(ctx, prompt, tr)
-	return Response{Text: r.Text, Tier: r.Tier, Cached: r.Cached}, nil
+	return Response{Text: r.Text, Tier: r.Tier, Cached: r.Cached}
 }
 
 // StreamToken is re-exported from the orchestrator so existing handlers
 // (api/handler.go) keep working without an import switch.
 type StreamToken = orchestrator.StreamToken
 
-// StreamWithQualityGate delegates to Orchestrator. Returns memory.Tier
-// (which Tier aliases) so callers see no observable change.
+// StreamWithQualityGate delegates to Orchestrator. Returns Tier (an alias
+// of telemetry.Tier through memory.Tier) so callers see no observable
+// change in the public API.
 func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out chan<- StreamToken) (Tier, error) {
 	return a.orch.StreamWithQualityGate(ctx, prompt, out)
 }

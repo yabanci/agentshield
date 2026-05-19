@@ -1,13 +1,22 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/yabanci/agentshield/config"
 )
+
+// webhookDNSResolveTimeout caps how long SSRF validation will wait for
+// hostname resolution. Without a bound, a hung DNS server stalls the
+// validation indefinitely and the HTTP handler waits out the request
+// timeout. 3s is plenty for normal resolvers and tight enough to fail
+// fast on a malicious slowloris-DNS attempt.
+const webhookDNSResolveTimeout = 3 * time.Second
 
 // validateWebhookURL guards against SSRF when an unprivileged user can set
 // the webhook destination. Rejects:
@@ -60,16 +69,21 @@ func isLoopbackOrPrivate(host string) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		return ipIsLoopbackOrPrivate(ip)
 	}
-	// Hostname — resolve and reject if ANY answer is private.
-	ips, err := net.LookupIP(host)
+	// Hostname — resolve under a hard deadline and reject if ANY answer is
+	// private. net.LookupIP would block on the default resolver with no
+	// timeout: a hostile DNS server can hang the validation indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), webhookDNSResolveTimeout)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
-		// Resolution failure: be defensive and reject. A webhook that can't
-		// resolve at validation time isn't useful anyway, and accepting it
-		// would only paper over the bypass.
+		// Resolution failure (timeout, NXDOMAIN, network error): be
+		// defensive and reject. A webhook that can't resolve at validation
+		// time isn't useful anyway, and accepting it would paper over the
+		// bypass.
 		return true
 	}
 	for _, ip := range ips {
-		if ipIsLoopbackOrPrivate(ip) {
+		if ipIsLoopbackOrPrivate(ip.IP) {
 			return true
 		}
 	}

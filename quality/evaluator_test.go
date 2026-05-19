@@ -2,10 +2,46 @@ package quality_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/yabanci/agentshield/quality"
 )
+
+// TestQuality_ConcurrentEvaluate_Safe verifies the godoc claim that
+// QualityEvaluator is safe for concurrent use. Fan out 50 goroutines
+// each running 20 evaluations against the SAME evaluator instance.
+// Run under -race to catch any data race in the rolling-length window
+// or signal accumulation. No deadlocks, no panics, no data races =
+// claim verified.
+func TestQuality_ConcurrentEvaluate_Safe(t *testing.T) {
+	eval := newTestEvaluator()
+	prompts := []string{
+		"What is a goroutine?",
+		"Explain channels in Go.",
+		"How does the GC work?",
+		"What is a slice header?",
+	}
+	responses := []string{
+		"A goroutine is a lightweight thread managed by the Go runtime. They are cheap to create.",
+		"Channels are typed conduits through which you can send and receive values with the channel operator.",
+		"The Go garbage collector is a concurrent, tri-color, mark-sweep collector that runs in parallel with the program.",
+		"A slice header contains a pointer to the backing array, the length, and the capacity.",
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < 50; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				idx := (g + i) % len(prompts)
+				_ = eval.Evaluate(context.Background(), prompts[idx], responses[idx])
+			}
+		}(g)
+	}
+	wg.Wait()
+}
 
 func newTestEvaluator() *quality.QualityEvaluator {
 	return quality.NewTestQualityEvaluator(nil) // no embedder in tests
