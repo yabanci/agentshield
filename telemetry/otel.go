@@ -80,6 +80,12 @@ func InitOTel(ctx context.Context, cfg config.OTelConfig) (func(context.Context)
 
 	otel.SetTracerProvider(tp)
 	slog.Info("OTel tracing enabled", "endpoint", cfg.Endpoint, "insecure", cfg.Insecure)
+	if cfg.Insecure {
+		slog.Warn("OTel exporter is configured INSECURE (plaintext)", slog.String("endpoint", cfg.Endpoint))
+	}
+	// M3: tool inputs are captured as span attributes (truncated to 2 KB).
+	// Review for PII before pointing at a shared collector.
+	slog.Info("OTel tracing enabled; tool inputs are captured as span attrs (truncated to 2 KB). Review for PII before pointing at a shared collector.")
 
 	return func(ctx context.Context) error {
 		// Give the BSP up to 5 seconds to flush in-flight spans.

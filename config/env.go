@@ -103,8 +103,10 @@ func LoadFromEnv() (*Config, error) {
 	if v := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); v != "" {
 		c.OTel.Endpoint = v
 	}
-	if os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "false" {
-		c.OTel.Insecure = false
+	if v := os.Getenv("OTEL_EXPORTER_OTLP_INSECURE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.OTel.Insecure = b
+		}
 	}
 	if v := os.Getenv("OTEL_EXPORTER_OTLP_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {

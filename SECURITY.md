@@ -32,6 +32,12 @@ GitHub issue or email the address on the repo owner's profile. If the
 project survives the hackathon and grows users, this section will be
 replaced with a real coordinated-disclosure policy.
 
+## OTel tracing and PII
+
+Tool inputs are captured as OTel span attributes (truncated to 2 KB). See
+[`docs/security-considerations.md`](docs/security-considerations.md) for the
+full trade-off analysis and mitigation options.
+
 ## Audit reports
 
 The eleven round-by-round audit reports are in `/Users/arsenozhetov/.claude/jobs/` and a high-level summary lives in the repo's commit history — each round closes with a `fix: round-N — …` commit listing the findings addressed.

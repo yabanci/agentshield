@@ -100,6 +100,16 @@ Never mix formats. Use tools when they help give a precise answer.`)
 	return b.String()
 }
 
+// KnownNames returns the set of registered tool names. Used by the metrics
+// layer to sanitize the {tool} Prometheus label and avoid cardinality explosion.
+func (r *ToolRegistry) KnownNames() map[string]struct{} {
+	out := make(map[string]struct{}, len(r.tools))
+	for name := range r.tools {
+		out[name] = struct{}{}
+	}
+	return out
+}
+
 func (r *ToolRegistry) List() []map[string]string {
 	list := make([]map[string]string, 0, len(r.tools))
 	for _, t := range r.tools {
