@@ -34,6 +34,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type MCPLookupTool struct {
@@ -51,7 +53,11 @@ func NewMCPLookupTool(mcpURL string) *MCPLookupTool {
 		url: mcpURL,
 		// Aggressive timeout — MCP calls should be sub-second; if they
 		// drag past 5s the tool CB will trip and ReAct loops won't stall.
-		client: &http.Client{Timeout: 5 * time.Second},
+		// otelhttp.NewTransport adds client spans + traceparent injection.
+		client: &http.Client{
+			Transport: otelhttp.NewTransport(http.DefaultTransport),
+			Timeout:   5 * time.Second,
+		},
 	}
 }
 

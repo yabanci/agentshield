@@ -7,10 +7,21 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/yabanci/agentshield/memory"
+	"github.com/yabanci/agentshield/telemetry"
 )
 
 const maxReactIterations = 6
+
+// reactTracer is the named OTel tracer for ReAct agent spans.
+var reactTracer = telemetry.Tracer("agentshield/react") //nolint:gochecknoglobals // package-level tracer per OTel idiom
+
+// maxAttrBytes is the per-attribute truncation limit for tool input/output.
+// OTel SDK rejects attribute values over 64 KB; we cap at 2 KB to keep traces
+// readable and avoid inflating the payload for large tool responses.
+const maxAttrBytes = 2 * 1024
 
 // ReactStep is one iteration of the Thought → Action → Observation loop.
 type ReactStep struct {
@@ -68,7 +79,10 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 	a.memory.Sessions.Add(sessionID, memory.Message{Role: "user", Content: prompt, At: nowFn()})
 
 	for i := 0; i < maxReactIterations; i++ {
-		resp := a.degrade(ctx, conversationCtx, tr)
+		iterCtx, iterSpan := reactTracer.Start(ctx, "agentshield.react.iteration")
+		iterSpan.SetAttributes(attribute.Int("iteration", i+1))
+
+		resp := a.degrade(iterCtx, conversationCtx, tr)
 		lastTier = resp.Tier
 		raw := strings.TrimSpace(resp.Text)
 
@@ -76,23 +90,35 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 		steps = append(steps, step)
 
 		if step.Answer != "" {
+			iterSpan.End()
 			return done(step.Answer, i+1, lastTier), nil
 		}
 
 		if step.Action != "" {
-			obs, toolErr := tools.Execute(ctx, step.Action, step.ActionInput)
+			toolCtx, toolSpan := reactTracer.Start(iterCtx, "agentshield.tool."+step.Action)
+			// Truncate tool.input to 2 KB; OTel SDK rejects values over 64 KB
+			// and large inputs waste trace storage without adding signal.
+			inputStr := truncateAttr(marshalArgs(step.ActionInput))
+			toolSpan.SetAttributes(attribute.String("tool.input", inputStr))
+
+			obs, toolErr := tools.Execute(toolCtx, step.Action, step.ActionInput)
 			if toolErr != nil {
 				obs = fmt.Sprintf("Tool error: %v", toolErr)
 			}
+			toolSpan.SetAttributes(attribute.Int("tool.output.len", len(obs)))
+			toolSpan.End()
+
 			step.Observation = obs
 			steps[len(steps)-1].Observation = obs
 			conversationCtx += fmt.Sprintf(
 				"Thought: %s\nAction: %s\nActionInput: %s\nObservation: %s\n",
-				step.Thought, step.Action, marshalArgs(step.ActionInput), obs,
+				step.Thought, step.Action, inputStr, obs,
 			)
+			iterSpan.End()
 			continue
 		}
 
+		iterSpan.End()
 		steps = append(steps, ReactStep{Iteration: i + 1, Answer: raw})
 		return done(raw, i+1, lastTier), nil
 	}
@@ -197,6 +223,16 @@ func buildHistory(messages []memory.Message) string {
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// truncateAttr caps a string at maxAttrBytes for OTel span attributes.
+// Truncated strings are suffixed with "...[truncated]" so consumers know data
+// was cut. See maxAttrBytes for the rationale.
+func truncateAttr(s string) string {
+	if len(s) <= maxAttrBytes {
+		return s
+	}
+	return s[:maxAttrBytes] + "...[truncated]"
 }
 
 // nowFn is overridable in tests.

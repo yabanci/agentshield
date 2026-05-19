@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // WebhookEvent is the payload sent to the configured webhook URL.
@@ -42,9 +44,13 @@ type WebhookDispatcher struct {
 }
 
 func NewWebhookDispatcher() *WebhookDispatcher {
+	// otelhttp.NewTransport adds client spans + traceparent injection while
+	// preserving the redirect-refusal behaviour via CheckRedirect below.
+	base := &http.Transport{}
 	return &WebhookDispatcher{
 		client: &http.Client{
-			Timeout: 5 * time.Second,
+			Transport: otelhttp.NewTransport(base),
+			Timeout:   5 * time.Second,
 			// Refuse redirects: a 301/302 to an internal IP (e.g.
 			// http://10.0.0.1/) would bypass the validation done at SetURL
 			// time. Webhook receivers don't legitimately need redirects.

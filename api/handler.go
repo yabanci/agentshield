@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"github.com/yabanci/agentshield/agent"
 	"github.com/yabanci/agentshield/api/web"
 	"github.com/yabanci/agentshield/config"
@@ -120,6 +121,23 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	// Dashboard + static assets
 	mux.HandleFunc("GET /", h.dashboard)
 	mux.Handle("GET /static/", web.StaticHandler())
+}
+
+// InstrumentedHandler wraps mux with otelhttp server-side tracing middleware.
+// A parent span is created per incoming request. High-volume probe and metrics
+// paths are filtered out to avoid noise in the trace backend.
+// Call this after Register so all routes are already registered on mux.
+func InstrumentedHandler(mux *http.ServeMux) http.Handler {
+	skipPaths := map[string]bool{
+		"/metrics":      true,
+		"/health/live":  true,
+		"/health/ready": true,
+	}
+	return otelhttp.NewHandler(mux, "agentshield",
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			return !skipPaths[r.URL.Path]
+		}),
+	)
 }
 
 // dashboardTmpl is parsed once at process start. ParseFS panics on bad templates,

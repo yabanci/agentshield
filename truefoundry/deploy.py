@@ -77,6 +77,12 @@ def deploy(workspace_fqn: str, image_tag: str = "latest") -> None:
             "AGENTSHIELD_AUTH_TOKEN": StringDataOrSecretRef(
                 value_from=SecretRef(secret_fqn="secret:AGENTSHIELD_AUTH_TOKEN")
             ),
+            # Optional: distributed tracing via OpenTelemetry.
+            # Uncomment and set to your OTLP/gRPC collector to enable flame graphs.
+            # When unset, a no-op tracer is installed — zero overhead, no spans emitted.
+            # "OTEL_EXPORTER_OTLP_ENDPOINT": "your-collector:4317",
+            # "OTEL_EXPORTER_OTLP_INSECURE": "true",
+            # "OTEL_EXPORTER_OTLP_TIMEOUT": "10s",
         },
         # Split probe paths matching the Go server: /health/live is liveness
         # only (no dep checks); /health/ready exercises the LLM provider.

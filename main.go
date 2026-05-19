@@ -12,6 +12,7 @@ import (
 	"github.com/yabanci/agentshield/agent"
 	"github.com/yabanci/agentshield/api"
 	"github.com/yabanci/agentshield/config"
+	"github.com/yabanci/agentshield/telemetry"
 )
 
 func main() {
@@ -27,6 +28,13 @@ func main() {
 	logger := cfg.NewLogger(os.Stdout)
 	slog.SetDefault(logger)
 
+	ctx := context.Background()
+	otelShutdown, err := telemetry.InitOTel(ctx, cfg.OTel)
+	if err != nil {
+		logger.Warn("OTel init failed — continuing with no-op tracer", "err", err)
+	}
+	defer func() { _ = otelShutdown(context.Background()) }()
+
 	a := agent.NewWithConfig(cfg, logger)
 	defer a.Stop()
 	h := api.New(a, cfg)
@@ -36,7 +44,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
-		Handler:      mux,
+		Handler:      api.InstrumentedHandler(mux),
 		ReadTimeout:  70 * time.Second,
 		WriteTimeout: 70 * time.Second,
 		IdleTimeout:  120 * time.Second,

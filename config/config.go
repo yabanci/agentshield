@@ -27,6 +27,20 @@ type Config struct {
 	Webhook   WebhookConfig
 	Score     ScoreConfig
 	MCP       MCPConfig
+	OTel      OTelConfig
+}
+
+// OTelConfig holds OpenTelemetry exporter settings.
+// All fields are read from env in env.go — no direct os.Getenv here.
+type OTelConfig struct {
+	// Endpoint is the OTLP gRPC target, e.g. "localhost:4317".
+	// Empty means no-op tracer (OTel disabled).
+	Endpoint string
+	// Insecure skips TLS for the exporter. Default true for dev convenience;
+	// set OTEL_EXPORTER_OTLP_INSECURE=false in production.
+	Insecure bool
+	// Timeout caps each export batch. Default 10s.
+	Timeout time.Duration
 }
 
 // MCPConfig wires the optional 5th ReAct tool to an external MCP server.
@@ -220,6 +234,12 @@ func Defaults() *Config {
 				"availability": 20,
 				"latency":      20,
 			},
+		},
+		OTel: OTelConfig{
+			// Insecure defaults to true: local collectors (Jaeger, Tempo,
+			// HyperDX dev) almost never run TLS. Set to false in production.
+			Insecure: true,
+			Timeout:  10 * time.Second,
 		},
 	}
 }

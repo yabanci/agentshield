@@ -387,6 +387,9 @@ go run .
 | `AGENTSHIELD_TRUSTED_PROXIES` | (empty) | Comma-separated CIDRs whose `X-Forwarded-For` is honored |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_FORMAT` | `text` | `text` or `json` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (empty) | OTLP/gRPC collector endpoint e.g. `localhost:4317`. Empty = no-op tracer (tracing disabled) |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `true` | Skip TLS on the OTLP exporter. Set to `false` in production |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10s` | Export batch timeout (Go duration string) |
 
 ---
 
@@ -481,7 +484,9 @@ agentshield_hedge_fires_total                  counter
 agentshield_webhook_dropped_total             counter
 ```
 
-> **Observability:** A production-grade Grafana 10 dashboard (14 panels across 4 rows: request flow, quality, latency, defenses) and 7 Prometheus alert rules with runbook URLs live in [`deploy/grafana/`](./deploy/grafana/) — import the JSON in one drag-and-drop, apply the PrometheusRule CRD or `rule_files:` entry, and every signal above has a panel and at least one alert threshold.
+> **Observability:**
+> - A production-grade Grafana 10 dashboard (14 panels across 4 rows: request flow, quality, latency, defenses) and 7 Prometheus alert rules with runbook URLs live in [`deploy/grafana/`](./deploy/grafana/) — import the JSON in one drag-and-drop, apply the PrometheusRule CRD or `rule_files:` entry, and every signal above has a panel and at least one alert threshold.
+> - **Distributed traces via OpenTelemetry** — set `OTEL_EXPORTER_OTLP_ENDPOINT` to any OTLP/gRPC collector (Jaeger, Tempo, HyperDX, Grafana Agent). Each request shows a parent server span plus tier-breakdown child spans (`agentshield.tier.primary`, `.fallback`, `.cache`, `.degrade`), quality score, CB state, and ReAct iteration + tool call spans — flame-graph visibility at every hop.
 
 ---
 

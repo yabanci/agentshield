@@ -44,7 +44,7 @@ A single dashboard shows the **Resilience Score** (5 × 20 = 100, components: Tr
 
 ## How we built it
 
-Go 1.26.3, no production dependencies outside `flowguard` (our own resilience-primitives library, also open-sourced at github.com/yabanci/flowguard, v0.3.0) and Prometheus client. 12 cohesive packages, acyclic dep graph, race-clean under `go test -race -count=10`.
+Go 1.26.3. Core dependencies: `flowguard` (our own resilience-primitives library, v0.3.0), Prometheus client, and OpenTelemetry SDK (OTLP/gRPC exporter + `otelhttp` transport). 12 cohesive packages, acyclic dep graph, race-clean under `go test -race -count=10`.
 
 The semantic CB and the quality evaluator are pure-Go and pure-local — no external API calls, no third-party model. The five quality signals run in 1-2ms each. Adaptive calibration captures the first 20 healthy responses and learns `mean ± σ` thresholds with a `std` floor (so a perfectly consistent model doesn't self-calibrate to a too-tight breaker) and a ceiling clamp (so a calibration-poisoning attacker can't pre-seed an over-strict band). The streaming variant aborts the primary mid-response and continues from fallback when refusal markers appear in the first 120 tokens.
 
