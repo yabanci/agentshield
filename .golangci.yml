@@ -25,3 +25,11 @@ linters:
       - path: 'config/.*\.go'
         linters:
           - forbidigo
+      # cmd/mcp-mock is a standalone demo binary (its own main package),
+      # not an agentshield consumer — its env vars (MCP_MOCK_PORT,
+      # MCP_MOCK_BIND) are scoped to itself and never read by the agent.
+      # Routing them through agentshield's config struct would add cross-
+      # binary coupling for zero benefit.
+      - path: 'cmd/mcp-mock/.*\.go'
+        linters:
+          - forbidigo

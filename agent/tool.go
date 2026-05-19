@@ -43,6 +43,12 @@ func newToolRegistry(a *Agent) *ToolRegistry {
 	r.register(&GetTimeTool{})
 	r.register(&SearchDocsTool{})
 	r.register(&CheckSystemTool{agent: a})
+	// Only register the MCP tool when MCP_URL is configured. Empty URL
+	// keeps the default ReAct prompt unchanged so the existing tool
+	// suite still works without an MCP server in the deployment.
+	if a.cfg != nil && a.cfg.MCP.URL != "" {
+		r.register(NewMCPLookupTool(a.cfg.MCP.URL))
+	}
 	return r
 }
 
@@ -199,6 +205,12 @@ func evalExpr(s string) (float64, error) {
 	v := p.parseExpr()
 	if p.err != nil {
 		return 0, p.err
+	}
+	// Reject trailing garbage: "2+3 BOGUS" used to return 5.0 with no
+	// error because parseExpr stopped at the first non-operator token.
+	p.skipWS()
+	if p.pos < len(p.input) {
+		return 0, fmt.Errorf("unexpected trailing input: %q", string(p.input[p.pos:]))
 	}
 	return v, nil
 }

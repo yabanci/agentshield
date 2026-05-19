@@ -25,6 +25,37 @@ const lineChart = new Chart(document.getElementById('chart-line').getContext('2d
   },plugins:{legend:{display:false}}}
 });
 
+// Latency-per-tier histogram. Grouped bars: each tier (primary / fallback /
+// cache) gets a p50 / p95 / p99 triplet. Updated on every status refresh
+// so judges watching the chaos demo see latency move tier-by-tier live.
+const latencyData = {
+  labels: ['primary','fallback','cache'],
+  datasets: [
+    {label:'p50',data:[0,0,0],backgroundColor:'#22c55e'},
+    {label:'p95',data:[0,0,0],backgroundColor:'#3b82f6'},
+    {label:'p99',data:[0,0,0],backgroundColor:'#a855f7'},
+  ],
+};
+const latencyChart = new Chart(document.getElementById('chart-latency').getContext('2d'),{
+  type:'bar', data:latencyData,
+  options:{
+    responsive:true,
+    scales:{
+      x:{ticks:{color:'#6b7280',font:{size:10}},grid:{display:false}},
+      y:{ticks:{color:'#4b5563',font:{size:9},callback:v=>v<1000?v+'ms':(v/1000).toFixed(1)+'s'},grid:{color:'#1f293744'},beginAtZero:true},
+    },
+    plugins:{legend:{position:'top',labels:{color:'#9ca3af',font:{size:10},boxWidth:10}}},
+  },
+});
+function updateLatencyChart(byTier){
+  if(!byTier) return;
+  const tiers = ['primary','fallback','cache'];
+  latencyData.datasets[0].data = tiers.map(t=>(byTier[t]?.p50_ms)||0);
+  latencyData.datasets[1].data = tiers.map(t=>(byTier[t]?.p95_ms)||0);
+  latencyData.datasets[2].data = tiers.map(t=>(byTier[t]?.p99_ms)||0);
+  latencyChart.update('none');
+}
+
 function updateDonut(){donutData.datasets[0].data=[tierCounts.primary,tierCounts.fallback,tierCounts.cache,tierCounts.degraded];donut.update('none');}
 function addLinePoint(total){
   const delta=total-lastTotal; lastTotal=total;
@@ -67,11 +98,28 @@ async function loadTools(){
 function switchTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{
     const tabs=['demo','session','charts'];
-    t.classList.toggle('active', tabs[i]===name);
+    const active = tabs[i]===name;
+    t.classList.toggle('active', active);
+    t.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
   document.getElementById('tab-'+name).classList.add('active');
 }
+// Keyboard support for the tab list — left/right arrows cycle.
+document.addEventListener('DOMContentLoaded', () => {
+  const tabs = ['demo','session','charts'];
+  document.querySelectorAll('[role="tablist"] .tab').forEach((tab, idx) => {
+    tab.addEventListener('keydown', (ev) => {
+      let next = idx;
+      if (ev.key === 'ArrowRight') next = (idx + 1) % tabs.length;
+      else if (ev.key === 'ArrowLeft') next = (idx + tabs.length - 1) % tabs.length;
+      else return;
+      ev.preventDefault();
+      switchTab(tabs[next]);
+      document.querySelectorAll('[role="tablist"] .tab')[next].focus();
+    });
+  });
+});
 
 // ── Send prompt ──────────────────────────────────────────────────────────
 async function sendPrompt(){
@@ -100,7 +148,16 @@ async function sendPrompt(){
 
 async function doChat(prompt){
   try{
-    const data = await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})}).then(r=>r.json());
+    const r = await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})});
+    if(!r.ok){
+      // Surface server-side failures instead of silently rendering nothing.
+      // A 5xx from /chat used to leave resp-box empty with no log entry.
+      const msg = await safeErrorMessage(r);
+      document.getElementById('resp-box').textContent = 'Error '+r.status+': '+msg;
+      log('✗ /chat '+r.status+' '+msg, 'le2');
+      return;
+    }
+    const data = await r.json();
     document.getElementById('resp-box').textContent=data.text;
     showTier(data.tier,data.cached,0,data.trace_id);
     tierCounts[data.tier]=(tierCounts[data.tier]||0)+1; updateDonut();
@@ -108,6 +165,18 @@ async function doChat(prompt){
   }catch(e){
     document.getElementById('resp-box').textContent='Error: '+e.message;
     log('✗ '+e.message,'le2');
+  }
+}
+
+// safeErrorMessage pulls a useful string out of a non-2xx response,
+// preferring the JSON {error} envelope the server emits but tolerating
+// any other body without crashing the dashboard.
+async function safeErrorMessage(r){
+  try{
+    const j = await r.json();
+    return j.error || r.statusText || 'request failed';
+  }catch(_){
+    return r.statusText || 'request failed';
   }
 }
 
@@ -152,7 +221,21 @@ async function doReact(prompt){
   }
 }
 
+// _activeStream tracks the chat EventSource so a mode switch / page hide /
+// repeated Send doesn't leave the prior stream's connection + ~90s timer
+// alive in the background. Both close() and clearTimeout() must run.
+let _activeStream = null;
+
+function closeActiveStream(){
+  if(_activeStream){
+    try { _activeStream.es.close(); } catch(_) {}
+    clearTimeout(_activeStream.killTimer);
+    _activeStream = null;
+  }
+}
+
 async function doStream(prompt){
+  closeActiveStream();
   const box=document.getElementById('resp-box');
   box.innerHTML='';
   const url='/chat/stream?prompt='+encodeURIComponent(prompt);
@@ -160,11 +243,12 @@ async function doStream(prompt){
   let tier='primary';
   let switched = false;
   await new Promise(res=>{
-    es.onmessage=e=>{
-      const d=JSON.parse(e.data);
-      if(d.done){tier=d.tier||tier;es.close();res();return;}
+    const killTimer = setTimeout(()=>{ es.close(); res(); }, 90000);
+    _activeStream = { es, killTimer };
+    es.onmessage = e => {
+      const d = JSON.parse(e.data);
+      if(d.done){ tier = d.tier || tier; closeActiveStream(); res(); return; }
       if(d.switched){
-        // B-7: visualize the quality-gate switch in the stream.
         switched = true;
         const div = document.createElement('div');
         div.style.cssText='border-left:3px solid #f97316;background:#7c2d1222;padding:8px 12px;margin:8px 0;border-radius:5px;font-size:12px;color:#fcd34d';
@@ -173,19 +257,26 @@ async function doStream(prompt){
         tier = d.tier || 'fallback';
         return;
       }
-      // Append token text — preserve switch divider as a child node.
       const tokenSpan = document.createElement('span');
       tokenSpan.textContent = d.token;
       if(switched) tokenSpan.style.background='#92400e22';
       box.appendChild(tokenSpan);
     };
-    es.onerror=()=>{es.close();res();};
-    setTimeout(()=>{es.close();res();},90000);
+    es.onerror = () => { closeActiveStream(); res(); };
   });
   showTier(tier,false);
   tierCounts[tier]=(tierCounts[tier]||0)+1; updateDonut();
   log('← 📡 stream via '+tier+(switched?' (quality-gate switched)':''), logClass(tier));
 }
+
+// Close any open EventSource when the user navigates away or hides the
+// tab — otherwise the browser keeps the connection (and our 90s timer)
+// alive in the background and the server-side goroutine waits out the
+// full ctx timeout.
+window.addEventListener('beforeunload', closeActiveStream);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') closeActiveStream();
+});
 
 function renderSteps(steps){
   if(!steps||!steps.length) return;
@@ -234,7 +325,25 @@ function newSession(){
 }
 
 // ── Chaos demo ───────────────────────────────────────────────────────────
+// _activeChaos prevents a double-click from opening a second EventSource
+// that the server would 409 on (only one chaos scenario can run at once).
+let _activeChaos = null;
+function closeActiveChaos(){
+  if(_activeChaos){
+    try { _activeChaos.close(); } catch(_) {}
+    _activeChaos = null;
+  }
+}
+window.addEventListener('beforeunload', closeActiveChaos);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') closeActiveChaos();
+});
+
 async function startChaos(){
+  if(_activeChaos){
+    log('chaos already running','i');
+    return;
+  }
   document.getElementById('chaos-btn').disabled=true;
   document.getElementById('chaos-btn').textContent='⏳ Running...';
   const logEl=document.getElementById('chaos-log');
@@ -250,6 +359,7 @@ async function startChaos(){
   };
 
   const es=new EventSource('/demo/chaos/stream');
+  _activeChaos = es;
   es.onmessage=e=>{
     const ev=JSON.parse(e.data);
     const clsMap={
@@ -266,47 +376,75 @@ async function startChaos(){
       if(ev.message.includes('restore_fallback')){document.getElementById('cb-fallback').textContent='closed';document.getElementById('cb-fallback').className='badge green';}
     }
     if(ev.type==='done'){
-      es.close();
+      closeActiveChaos();
       document.getElementById('chaos-btn').disabled=false;
       document.getElementById('chaos-btn').textContent='▶ Run Chaos Demo';
       refreshStatus();
     }
   };
   es.onerror=()=>{
-    es.close();
+    closeActiveChaos();
     document.getElementById('chaos-btn').disabled=false;
     document.getElementById('chaos-btn').textContent='▶ Run Chaos Demo';
   };
 }
 
 // ── Manual controls ──────────────────────────────────────────────────────
-async function kill(which){
-  const url=which==='fallback'?'/demo/kill-fallback':'/demo/kill';
-  await authFetch(url,{method:'POST'});
-  log('💀 '+which+' killed (transport)','lw');
-  await refreshStatus();
-}
-async function restore(which){
-  const url=which==='fallback'?'/demo/restore-fallback':'/demo/restore';
-  await authFetch(url,{method:'POST'});
-  log('✅ '+which+' restored','');
-  await refreshStatus();
-}
-async function enableDegrade(){
-  await fetch('/demo/degrade',{method:'POST'});
-  log('🧪 Degrade mode ON — primary returns low-quality responses (HTTP 200 ✓)','lw');
-  await refreshStatus();
-}
-async function disableDegrade(){
-  await fetch('/demo/restore-quality',{method:'POST'});
-  log('✅ Quality restored — primary back to normal','');
+// demoAction posts to a demo control endpoint and only logs success when
+// the server actually applied the action. Pre-fix kill/restore/{en,dis}able
+// fired-and-forgot — a 401 (auth cancelled) or any 5xx left the dashboard
+// claiming the action succeeded while server state was unchanged.
+async function demoAction(url, okMsg, failMsg, cls){
+  let r;
+  try{
+    r = await authFetch(url,{method:'POST'});
+  }catch(e){
+    log('✗ '+failMsg+': '+e.message,'le2');
+    await refreshStatus();
+    return;
+  }
+  if(!r.ok){
+    const msg = await safeErrorMessage(r);
+    log('✗ '+failMsg+' '+r.status+': '+msg, 'le2');
+    await refreshStatus();
+    return;
+  }
+  log(okMsg, cls||'');
   await refreshStatus();
 }
 
+async function kill(which){
+  const url = which==='fallback'?'/demo/kill-fallback':'/demo/kill';
+  await demoAction(url, '💀 '+which+' killed (transport)', 'kill '+which, 'lw');
+}
+async function restore(which){
+  const url = which==='fallback'?'/demo/restore-fallback':'/demo/restore';
+  await demoAction(url, '✅ '+which+' restored', 'restore '+which, '');
+}
+async function enableDegrade(){
+  await demoAction('/demo/degrade',
+    '🧪 Degrade mode ON — primary returns low-quality responses (HTTP 200 ✓)',
+    'enable degrade', 'lw');
+}
+async function disableDegrade(){
+  await demoAction('/demo/restore-quality',
+    '✅ Quality restored — primary back to normal',
+    'restore quality', '');
+}
+
 // ── Status ───────────────────────────────────────────────────────────────
+// _statusInFlight prevents overlapping /status fetches from stomping on
+// each other. With a 3s interval + per-action calls, two requests can be
+// in flight at once and the slower (older) response would win the final
+// DOM write — producing a flickery "back-and-forth" UI during chaos.
+let _statusInFlight = false;
 async function refreshStatus(){
+  if(_statusInFlight) return;
+  _statusInFlight = true;
   try{
-    const s=await fetch('/status').then(r=>r.json());
+    const r = await fetch('/status');
+    if(!r.ok){ _statusInFlight = false; return; }
+    const s = await r.json();
     const pk=s.primary_killed?'killed':s.primary_breaker;
     const fk=s.fallback_killed?'killed':s.fallback_breaker;
     setBadge('cb-primary','transport: '+pk);
@@ -356,6 +494,7 @@ async function refreshStatus(){
     const lat = s.latency||{};
     const p95 = lat.primary_p95_ms||0;
     document.getElementById('score-p95').textContent = p95>0 ? (p95<1000?p95+'ms':(p95/1000).toFixed(1)+'s') : '—';
+    updateLatencyChart(lat.by_tier);
 
     // Drift detection from primary semantic CB calibration
     const driftBadge = document.getElementById('calib-primary');
@@ -388,6 +527,9 @@ async function refreshStatus(){
 
     addLinePoint(s.total_requests);
   }catch(_){}
+  finally {
+    _statusInFlight = false;
+  }
 }
 
 function setSemBadge(id, state, reason){
@@ -439,6 +581,15 @@ function showTier(tier,cached,turns,traceId){
   document.getElementById('resp-meta').style.display='flex';
   const tb=document.getElementById('tier-badge');
   tb.textContent=tier; tb.className='badge '+(tierColor[tier]||'gray');
+  // Pulse the corresponding row in the degradation-chain card so the
+  // user SEES which tier answered. CSS already defines .tier.lit;
+  // round-6 frontend audit noted it was never toggled.
+  document.querySelectorAll('.tier').forEach(t => t.classList.remove('lit'));
+  const row = document.getElementById('tier-'+tier);
+  if (row) {
+    row.classList.add('lit');
+    setTimeout(() => row.classList.remove('lit'), 1500);
+  }
   document.getElementById('cached-badge').style.display=cached?'inline':'none';
   const turnsB=document.getElementById('turns-badge');
   if(turns){turnsB.textContent=turns+' turns';turnsB.style.display='inline';}
@@ -557,7 +708,53 @@ async function showTrace(traceId){
   }
 
   const tierC = {primary:'#3b82f6', fallback:'#d97706', cache:'#7c3aed', degraded:'#dc2626'};
-  (tr.steps || []).forEach((s) => {
+  const outcomeC = {
+    success:        '#22c55e',
+    cache_hit:      '#7c3aed',
+    transport_error:'#dc2626',
+    semantic_failure:'#f59e0b',
+    semantic_cb_open:'#f59e0b',
+    killed:         '#6b7280',
+    graceful_denial:'#9ca3af',
+  };
+
+  // Flame timeline strip — each step is a bar whose width is proportional to
+  // step.latency_ms / total_ms. Color by outcome so success / fallback /
+  // semantic_failure / graceful_denial are visually distinct at a glance.
+  const steps = tr.steps || [];
+  if (steps.length > 0) {
+    const flameLabel = document.createElement('div');
+    flameLabel.style.cssText = 'font-size:10px;color:#6b7280;margin:6px 0 4px 0;text-transform:uppercase;letter-spacing:0.5px';
+    flameLabel.textContent = 'Resilience timeline';
+    modal.append(flameLabel);
+
+    const flame = document.createElement('div');
+    flame.style.cssText = 'display:flex;width:100%;height:28px;border-radius:6px;overflow:hidden;background:#0a0c14;margin-bottom:6px;border:1px solid #1f2937';
+
+    const total = Math.max(1, tr.total_ms || steps.reduce((a,s)=>a+(s.latency_ms||0), 0));
+    steps.forEach((s, i) => {
+      const widthPct = Math.max(2, ((s.latency_ms || 0) / total) * 100);
+      const bar = document.createElement('div');
+      bar.style.cssText = 'flex:0 0 '+widthPct.toFixed(2)+'%;background:'+(outcomeC[s.outcome] || tierC[s.tier] || '#6b7280')+';display:flex;align-items:center;justify-content:center;font-size:10px;color:#0a0c14;font-weight:600;cursor:default;border-right:'+(i<steps.length-1?'1px solid #0a0c14':'none');
+      bar.title = (s.tier || '?') + ' · ' + (s.outcome || '?') + ' · ' + (s.latency_ms||0) + 'ms';
+      // Only show the tier emoji if the bar is wide enough; otherwise just a dot.
+      bar.textContent = widthPct > 8 ? tierEmoji(s.tier) : '';
+      flame.append(bar);
+    });
+    modal.append(flame);
+
+    // Tier scale: total duration and final outcome under the bar.
+    const scale = document.createElement('div');
+    scale.style.cssText = 'display:flex;justify-content:space-between;font-size:10px;color:#6b7280;margin-bottom:14px';
+    const left = document.createElement('span');
+    left.textContent = '0ms';
+    const right = document.createElement('span');
+    right.textContent = (tr.total_ms || 0) + 'ms · ended in ' + (tr.final_tier || '?');
+    scale.append(left, right);
+    modal.append(scale);
+  }
+
+  steps.forEach((s) => {
     const stepBox = document.createElement('div');
     stepBox.style.cssText = 'border-left:3px solid ' + (tierC[s.tier] || '#6b7280') + ';padding:10px 12px;margin-bottom:6px;background:#0a0c14;border-radius:6px';
 
@@ -599,6 +796,111 @@ window.showTrace = showTrace;
 
 function scoreGradeClass(n){if(n>=90)return'green';if(n>=75)return'blue';if(n>=60)return'yellow';return'red';}
 function scoreColor(n){if(n>=90)return'#6ee7b7';if(n>=75)return'#93c5fd';if(n>=60)return'#fcd34d';return'#fca5a5';}
+// runCompare fires POST /demo/compare and renders both sides in the panel.
+// Built entirely via DOM API so server-returned text can never inject HTML
+// — same threat model as showTrace().
+async function runCompare(){
+  const prompt = document.getElementById('prompt').value.trim();
+  if(!prompt){ alert('Type a prompt first.'); return; }
+  const out = document.getElementById('compare-result');
+  out.textContent = '';
+  out.style.display = 'block';
+  const loading = document.createElement('div');
+  loading.style.cssText = 'font-size:11px;color:#9ca3af;padding:8px';
+  loading.textContent = 'Running both sides in parallel… (up to 90s)';
+  out.appendChild(loading);
+
+  let res;
+  try {
+    const r = await fetch('/demo/compare', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({prompt}),
+    });
+    if (!r.ok) {
+      // /demo/compare has a tight 10 req/min rate limit (rounds 2+4).
+      // Surface 429 distinctly so the user knows to slow down.
+      const msg = await safeErrorMessage(r);
+      out.textContent = '';
+      const err = document.createElement('div');
+      err.style.cssText = 'color:#fca5a5;font-size:11px;padding:8px';
+      err.textContent = (r.status === 429 ? 'Rate-limited (10/min for compare). Wait a few seconds and retry.'
+                                          : 'Compare failed: '+r.status+' '+msg);
+      out.appendChild(err);
+      return;
+    }
+    res = await r.json();
+  } catch(e) {
+    out.textContent = '';
+    const err = document.createElement('div');
+    err.style.cssText = 'color:#fca5a5;font-size:11px;padding:8px';
+    err.textContent = 'Compare failed: ' + e.message;
+    out.appendChild(err);
+    return;
+  }
+
+  out.textContent = '';
+  const grid = document.createElement('div');
+  grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px';
+
+  grid.appendChild(buildCompareSide('🛡️ Shielded', res.shielded, '#22c55e'));
+  grid.appendChild(buildCompareSide('🪤 Raw', res.raw, '#ef4444'));
+  out.appendChild(grid);
+
+  const foot = document.createElement('div');
+  foot.style.cssText = 'font-size:10px;color:#6b7280;margin-top:6px;text-align:right';
+  foot.textContent = 'Total ' + (res.duration_ms||0) + 'ms (both ran concurrently)';
+  out.appendChild(foot);
+}
+
+function buildCompareSide(title, side, color){
+  const box = document.createElement('div');
+  box.style.cssText = 'border:1px solid '+color+'55;border-radius:6px;padding:10px;background:#0a0c14';
+
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px';
+  const titleEl = document.createElement('span');
+  titleEl.style.cssText = 'font-size:12px;font-weight:600;color:'+color;
+  titleEl.textContent = title;
+  const lat = document.createElement('span');
+  lat.style.cssText = 'font-size:10px;color:#9ca3af';
+  lat.textContent = (side.latency_ms || 0) + 'ms';
+  header.append(titleEl, lat);
+  box.append(header);
+
+  const meta = document.createElement('div');
+  meta.style.cssText = 'display:flex;gap:6px;font-size:10px;color:#6b7280;margin-bottom:6px;flex-wrap:wrap';
+  if (side.tier) {
+    const tierTag = document.createElement('span');
+    tierTag.style.cssText = 'background:#1f2937;color:#9ca3af;padding:2px 6px;border-radius:4px';
+    tierTag.textContent = 'tier: ' + side.tier;
+    meta.appendChild(tierTag);
+  }
+  if (side.quality_score != null) {
+    const qTag = document.createElement('span');
+    const q = side.quality_score;
+    const qc = q >= 0.7 ? '#22c55e' : (q >= 0.45 ? '#f59e0b' : '#ef4444');
+    qTag.style.cssText = 'background:'+qc+'22;color:'+qc+';padding:2px 6px;border-radius:4px';
+    qTag.textContent = 'quality: ' + Math.round(q*100) + '%';
+    meta.appendChild(qTag);
+  }
+  if (side.cached) {
+    const c = document.createElement('span');
+    c.style.cssText = 'background:#7c3aed22;color:#a78bfa;padding:2px 6px;border-radius:4px';
+    c.textContent = 'cached';
+    meta.appendChild(c);
+  }
+  if (meta.children.length) box.append(meta);
+
+  const text = document.createElement('div');
+  text.style.cssText = 'font-size:11px;color:#e2e8f0;background:#111827;padding:8px;border-radius:4px;max-height:180px;overflow-y:auto;white-space:pre-wrap;font-family:inherit';
+  text.textContent = side.error ? ('ERROR: ' + side.error) : (side.text || '(empty)');
+  box.append(text);
+
+  return box;
+}
+window.runCompare = runCompare;
+
 function logClass(t){return t==='degraded'?'le2':t!=='primary'?'lw':'';}
 // log appends a text-only log line. msg is treated as plain text — never HTML.
 function log(msg,cls){

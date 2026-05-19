@@ -39,12 +39,12 @@ func TestDegradedWrapper_GarbageWhenEnabled(t *testing.T) {
 	if r.Text == "real answer" {
 		t.Errorf("expected degraded text, got real")
 	}
-	// Degraded responses must contain hallucination markers so the semantic CB trips.
+	// Degraded responses must contain refusal markers so the semantic CB trips.
 	lower := strings.ToLower(r.Text)
 	if !strings.Contains(lower, "as an ai") &&
 		!strings.Contains(lower, "i cannot") &&
 		!strings.Contains(lower, "i'm just an ai") {
-		t.Errorf("degraded text lacks hallucination marker: %q", r.Text)
+		t.Errorf("degraded text lacks refusal marker: %q", r.Text)
 	}
 }
 

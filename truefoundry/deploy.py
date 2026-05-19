@@ -60,15 +60,36 @@ def deploy(workspace_fqn: str, image_tag: str = "latest") -> None:
             "OLLAMA_URL": StringDataOrSecretRef(
                 value_from=SecretRef(secret_fqn="secret:OLLAMA_URL")
             ),
+            # Multi-provider knobs — set LLM_PROVIDER=openai to route
+            # through any OpenAI-compatible /v1/chat/completions endpoint.
+            # OPENAI_API_KEY must exist as a secret for this path to work.
+            "LLM_PROVIDER": "",
+            "OPENAI_BASE_URL": "https://api.openai.com/v1",
+            "OPENAI_PRIMARY_MODEL": "gpt-4o-mini",
+            "OPENAI_FALLBACK_MODEL": "gpt-4o-mini",
+            "OPENAI_EMBED_MODEL": "",
+            "OPENAI_API_KEY": StringDataOrSecretRef(
+                value_from=SecretRef(secret_fqn="secret:OPENAI_API_KEY")
+            ),
+            # AGENTSHIELD_AUTH_TOKEN gates demo/session/trace/webhook
+            # endpoints. REQUIRED for shared deployments — without it any
+            # visitor could POST /demo/kill and wedge the live demo.
+            "AGENTSHIELD_AUTH_TOKEN": StringDataOrSecretRef(
+                value_from=SecretRef(secret_fqn="secret:AGENTSHIELD_AUTH_TOKEN")
+            ),
         },
+        # Split probe paths matching the Go server: /health/live is liveness
+        # only (no dep checks); /health/ready exercises the LLM provider.
+        # The legacy /health alias on this service is the same as ready —
+        # using it for liveness causes restart loops whenever Ollama blinks.
         liveness_probe=ServiceLivenessProbe(
-            config=HttpProbe(path="/health", port=8080),
+            config=HttpProbe(path="/health/live", port=8080),
             initial_delay_seconds=10,
             period_seconds=15,
             failure_threshold=3,
         ),
         readiness_probe=ServiceReadinessProbe(
-            config=HttpProbe(path="/health", port=8080),
+            config=HttpProbe(path="/health/ready", port=8080),
             initial_delay_seconds=5,
             period_seconds=10,
         ),

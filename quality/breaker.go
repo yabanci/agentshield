@@ -213,11 +213,30 @@ func (sb *SemanticBreaker) calibrate() {
 	variance /= n
 	std := math.Sqrt(variance)
 
-	// Thresholds: mean ± 1σ and mean ± 2σ, floored to sane minimums.
-	// Enforce failing < degraded with a minimum gap of 0.10 to prevent
-	// both collapsing to the same value when std=0 (uniform samples).
-	degraded := math.Max(0.40, mean-1.0*std)
-	failing := math.Max(0.20, mean-2.0*std)
+	// Floor std at 0.05 so a perfectly consistent model doesn't end up with
+	// an over-tight breaker. Pre-fix: a model scoring 0.92 ± 0.01 would
+	// calibrate failing = mean - 2σ = 0.90, and any single response below
+	// 0.90 would trip — the more reliable your model, the more aggressive
+	// its breaker. The 0.05 floor keeps the band wide enough that normal
+	// score noise doesn't fire spurious failures.
+	if std < 0.05 {
+		std = 0.05
+	}
+
+	// Thresholds: mean ± 1σ and mean ± 2σ, then clamped to [floor, ceiling].
+	// Floor keeps thresholds from collapsing toward zero on a degraded
+	// fresh model. Ceiling defends against calibration-poisoning attacks
+	// where the first 20 samples are hand-crafted high-quality responses
+	// (mean ≈ 0.99) — without a ceiling, degraded would tighten to 0.94
+	// and trip the breaker on legitimate ~0.80 production output.
+	const (
+		minDegraded = 0.40
+		maxDegraded = 0.80
+		minFailing  = 0.20
+		maxFailing  = 0.60
+	)
+	degraded := math.Min(maxDegraded, math.Max(minDegraded, mean-1.0*std))
+	failing := math.Min(maxFailing, math.Max(minFailing, mean-2.0*std))
 	if degraded-failing < 0.10 {
 		failing = math.Max(0.10, degraded-0.15)
 	}

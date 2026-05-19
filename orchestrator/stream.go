@@ -22,9 +22,12 @@ type StreamToken struct {
 }
 
 // StreamWithQualityGate streams tokens with an inline quality gate.
-// If hallucination markers are detected in the first 120 tokens, the stream
-// aborts and continues from the fallback model. The caller receives a
-// StreamToken{Switched: true} event at the switch point.
+// Catches refusal/persona-leak phrases in the first 120 tokens; on a hit
+// the primary stream aborts and the rest of the response continues from
+// the fallback model. The caller receives a StreamToken{Switched: true}
+// event at the switch point. This detects STRUCTURAL degradation (the
+// model has stopped answering); factual-accuracy hallucinations are out
+// of scope.
 func (o *Orchestrator) StreamWithQualityGate(ctx context.Context, prompt string, out chan<- StreamToken) (memory.Tier, error) {
 	canUsePrimary := !o.chaos.IsPrimaryKilled() &&
 		!o.breakers.PrimarySemantic.ShouldBlock() &&
@@ -53,10 +56,10 @@ func (o *Orchestrator) StreamWithQualityGate(ctx context.Context, prompt string,
 			buf.WriteString(token)
 			tokenCount++
 
-			// Quality gate: check every 30 tokens for hallucination markers.
+			// Quality gate: check every 30 tokens for refusal markers.
 			if tokenCount%30 == 0 && tokenCount <= 120 {
-				hallScore, reason := quality.HallucinationScore(buf.String())
-				if hallScore < 0.5 {
+				refScore, reason := quality.RefusalMarkerScore(buf.String())
+				if refScore < 0.5 {
 					tripped = true
 					cancelStream() // abort primary stream
 					for range rawTokens {

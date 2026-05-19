@@ -47,7 +47,7 @@ func (d *DegradedWrapper) Embed(ctx context.Context, text string) ([]float64, er
 func (d *DegradedWrapper) Ping(ctx context.Context) error { return d.inner.Ping(ctx) }
 
 // degradedText returns a low-quality response that reliably scores below
-// QualityAcceptable (0.45) by combining repetition + hallucination markers
+// QualityAcceptable (0.45) by combining repetition + refusal markers
 // (~score 0.10–0.15). All variants use both signals so the semantic CB trips
 // consistently regardless of which branch fires.
 func degradedText(prompt string) string {

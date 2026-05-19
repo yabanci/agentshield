@@ -138,14 +138,20 @@ func newAgent(cfg *config.Config, log *slog.Logger) *Agent {
 		} else {
 			// Keep an Ollama embedder available so the cache and quality
 			// evaluator still work; cost stays at zero unless caller opts in.
+			// cfg.Models.Embedding flows through as the model name.
 			embedProvider = provider.NewOllama(config.ProviderConfig{
-				Kind:    "ollama",
-				BaseURL: "http://localhost:11434",
-				Timeout: cfg.Provider.Timeout,
+				Kind:       "ollama",
+				BaseURL:    "http://localhost:11434",
+				EmbedModel: cfg.Models.Embedding,
+				Timeout:    cfg.Provider.Timeout,
 			})
 		}
 	default: // "ollama" or empty
-		ol := provider.NewOllama(cfg.Provider)
+		// Forward cfg.Models.Embedding so the operator can swap the embedder
+		// model (e.g. mxbai-embed-large) without touching code.
+		olCfg := cfg.Provider
+		olCfg.EmbedModel = cfg.Models.Embedding
+		ol := provider.NewOllama(olCfg)
 		chatProvider = ol
 		embedProvider = ol
 	}
@@ -189,8 +195,32 @@ func newAgent(cfg *config.Config, log *slog.Logger) *Agent {
 		circuitbreaker.WithFailureThreshold(cfg.Limits.FallbackCBThreshold),
 		circuitbreaker.WithOpenTimeout(30*time.Second),
 	)
+	// logCBTransition emits a structured event for every semantic CB state
+	// change. SREs alerting off logs (not metrics) can pattern-match on
+	// "semantic_cb_state_change" without scraping Prometheus. Severity
+	// climbs with state: degraded → WARN, failing → ERROR.
+	logCBTransition := func(model string, prev, next quality.SBState, reason string, avg float64) {
+		args := []any{
+			slog.String("event", "semantic_cb_state_change"),
+			slog.String("model", model),
+			slog.String("prev_state", string(prev)),
+			slog.String("new_state", string(next)),
+			slog.String("reason", reason),
+			slog.Float64("avg_quality", avg),
+		}
+		switch next {
+		case quality.SBFailing:
+			log.Error("semantic circuit breaker opened (failing)", args...)
+		case quality.SBDegraded:
+			log.Warn("semantic circuit breaker degraded", args...)
+		default:
+			log.Info("semantic circuit breaker recovered", args...)
+		}
+	}
+
 	ps := quality.NewSemanticBreaker(quality.DefaultSBConfig).
 		WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
+			logCBTransition(primaryModel, prev, next, reason, avg)
 			a.telemetry.Webhook.Fire(telemetry.WebhookEvent{
 				Event:      fmt.Sprintf("semantic_cb_%s", next),
 				Model:      primaryModel,
@@ -209,6 +239,7 @@ func newAgent(cfg *config.Config, log *slog.Logger) *Agent {
 		OpenTimeout:       30 * time.Second,
 		RecoverySamples:   2,
 	}).WithStateChangeCallback(func(prev, next quality.SBState, reason string, avg float64) {
+		logCBTransition(fallbackModel, prev, next, reason, avg)
 		a.telemetry.Webhook.Fire(telemetry.WebhookEvent{
 			Event:      fmt.Sprintf("semantic_cb_%s", next),
 			Model:      fallbackModel,
@@ -350,9 +381,11 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 			bh = a.batchBH
 		}
 		return bh.Do(ctx, func(ctx context.Context) error {
-			var bhErr error
-			resp, bhErr = a.degrade(ctx, prompt, tr)
-			return bhErr
+			// degrade always returns a usable Response — graceful denial
+			// is itself a response, not an error. The error path here is
+			// reserved for future hard-fail signals from the orchestrator.
+			resp = a.degrade(ctx, prompt, tr)
+			return nil
 		})
 	})
 
@@ -382,20 +415,129 @@ func (a *Agent) ask(ctx context.Context, prompt string, batch bool) (Response, e
 }
 
 // degrade delegates to Orchestrator. Kept as a method on Agent so react.go
-// can call it without taking an Orchestrator parameter.
-func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) (Response, error) {
+// can call it without taking an Orchestrator parameter. Cannot fail —
+// graceful-denial is itself a Response with Tier=TierDegraded, not an error.
+func (a *Agent) degrade(ctx context.Context, prompt string, tr *memory.Trace) Response {
 	r := a.orch.Degrade(ctx, prompt, tr)
-	return Response{Text: r.Text, Tier: r.Tier, Cached: r.Cached}, nil
+	return Response{Text: r.Text, Tier: r.Tier, Cached: r.Cached}
 }
 
 // StreamToken is re-exported from the orchestrator so existing handlers
 // (api/handler.go) keep working without an import switch.
 type StreamToken = orchestrator.StreamToken
 
-// StreamWithQualityGate delegates to Orchestrator. Returns memory.Tier
-// (which Tier aliases) so callers see no observable change.
+// StreamWithQualityGate delegates to Orchestrator. Returns Tier (an alias
+// of telemetry.Tier through memory.Tier) so callers see no observable
+// change in the public API.
 func (a *Agent) StreamWithQualityGate(ctx context.Context, prompt string, out chan<- StreamToken) (Tier, error) {
 	return a.orch.StreamWithQualityGate(ctx, prompt, out)
+}
+
+// CompareResult is the per-side outcome of a side-by-side comparison.
+type CompareResult struct {
+	Text         string  `json:"text"`
+	Tier         string  `json:"tier,omitempty"`
+	LatencyMS    int64   `json:"latency_ms"`
+	QualityScore float64 `json:"quality_score"`
+	Cached       bool    `json:"cached,omitempty"`
+	TraceID      string  `json:"trace_id,omitempty"`
+	Error        string  `json:"error,omitempty"`
+}
+
+// ComparePair bundles a shielded + raw run of the same prompt for the
+// /demo/compare endpoint. Shielded goes through the full degradation
+// chain; raw calls the underlying LLM provider directly with no CB, no
+// retry, no quality gate, no semantic cache. The whole point is to make
+// the value of AgentShield visible — during degrade mode, the raw side
+// returns garbage with high latency and low quality_score; the shielded
+// side returns a good answer via the fallback model.
+type ComparePair struct {
+	Prompt    string        `json:"prompt"`
+	Shielded  CompareResult `json:"shielded"`
+	Raw       CompareResult `json:"raw"`
+	DurationMS int64        `json:"duration_ms"`
+}
+
+// Compare fires the same prompt through both the resilience stack and a
+// raw provider call, concurrently. Returns once both finish (or fail).
+// The raw side uses the primary model name but bypasses the chaos
+// wrapper — i.e. it talks directly to the underlying LLM, so the user
+// sees what would happen without AgentShield's mitigations.
+func (a *Agent) Compare(ctx context.Context, prompt string) ComparePair {
+	pair := ComparePair{Prompt: prompt}
+	start := time.Now()
+
+	type shieldedOut struct {
+		resp Response
+		err  error
+		dur  time.Duration
+	}
+	type rawOut struct {
+		text string
+		err  error
+		dur  time.Duration
+	}
+	shieldedCh := make(chan shieldedOut, 1)
+	rawCh := make(chan rawOut, 1)
+
+	go func() {
+		t := time.Now()
+		resp, err := a.Ask(ctx, prompt)
+		shieldedCh <- shieldedOut{resp: resp, err: err, dur: time.Since(t)}
+	}()
+
+	go func() {
+		t := time.Now()
+		// Use a.primary (the DegradedWrapper around the chat provider) so
+		// that the chaos demo's degrade-mode toggle still affects this
+		// "raw" call — that's the whole point of the comparison. We do
+		// NOT go through flowguard (no CB, no retry, no hedge, no semantic
+		// gate), so this represents "what the LLM hands back if you call
+		// it directly." When degrade is on, that's garbage; AgentShield's
+		// shielded side then visibly out-performs.
+		r, err := a.primary.Generate(ctx, provider.Request{
+			Model:  a.primaryModel,
+			Prompt: prompt,
+		})
+		rawCh <- rawOut{text: r.Text, err: err, dur: time.Since(t)}
+	}()
+
+	s := <-shieldedCh
+	r := <-rawCh
+
+	// Evaluate quality on both sides so the dashboard can show that the
+	// raw response is, say, 0.18 while the shielded response is 0.91.
+	eval := quality.NewEvaluator(a.embedder.Embed)
+
+	pair.Shielded = CompareResult{
+		Text:      s.resp.Text,
+		Tier:      string(s.resp.Tier),
+		Cached:    s.resp.Cached,
+		TraceID:   s.resp.TraceID,
+		LatencyMS: s.dur.Milliseconds(),
+	}
+	if s.err != nil {
+		// Scrub the raw error string — it can contain internal URLs and
+		// upstream provider URLs. Log full detail server-side via slog.
+		a.log.Warn("compare shielded call failed", "err", s.err)
+		pair.Shielded.Error = "shielded call failed"
+	} else if s.resp.Text != "" {
+		pair.Shielded.QualityScore = eval.Evaluate(ctx, prompt, s.resp.Text).Score
+	}
+
+	pair.Raw = CompareResult{
+		Text:      r.text,
+		LatencyMS: r.dur.Milliseconds(),
+	}
+	if r.err != nil {
+		a.log.Warn("compare raw call failed", "err", r.err)
+		pair.Raw.Error = "raw call failed"
+	} else if r.text != "" {
+		pair.Raw.QualityScore = eval.Evaluate(ctx, prompt, r.text).Score
+	}
+
+	pair.DurationMS = time.Since(start).Milliseconds()
+	return pair
 }
 
 // KillPrimary / RestorePrimary simulate primary model failures.
@@ -492,10 +634,12 @@ func (a *Agent) Status() Status {
 	return s
 }
 
-// Ping checks if Ollama is reachable.
+// Ping checks if the primary LLM provider is reachable. The error string
+// uses the provider's own Name() so /health/ready output reflects whatever
+// backend is actually configured (ollama / openai / groq / ...).
 func (a *Agent) Ping(ctx context.Context) error {
 	if err := a.primary.Ping(ctx); err != nil {
-		return fmt.Errorf("ollama unreachable: %w", err)
+		return fmt.Errorf("%s provider unreachable: %w", a.primary.Name(), err)
 	}
 	return nil
 }

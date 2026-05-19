@@ -32,17 +32,43 @@ env:
     value_from:
       type: secret
       secret_fqn: "secret:OLLAMA_URL"
+  # Multi-provider — set LLM_PROVIDER=openai and supply OPENAI_API_KEY to
+  # route through any OpenAI-compatible /v1/chat/completions endpoint
+  # (OpenAI, Groq, OpenRouter, Together, vLLM, Mistral). Leave empty to
+  # stay on Ollama.
+  #   tfy secret create --name OPENAI_API_KEY --value "sk-..."
+  LLM_PROVIDER: ""
+  OPENAI_BASE_URL: "https://api.openai.com/v1"
+  OPENAI_PRIMARY_MODEL: "gpt-4o-mini"
+  OPENAI_FALLBACK_MODEL: "gpt-4o-mini"
+  OPENAI_EMBED_MODEL: ""
+  OPENAI_API_KEY:
+    value_from:
+      type: secret
+      secret_fqn: "secret:OPENAI_API_KEY"
+  # AGENTSHIELD_AUTH_TOKEN gates /demo/*, /sessions/*, /trace/{id} and
+  # /config/webhook. REQUIRED for any public/shared deployment — without
+  # it judges could wedge the demo by hitting /demo/kill on each other.
+  #   tfy secret create --name AGENTSHIELD_AUTH_TOKEN --value "<random>"
+  AGENTSHIELD_AUTH_TOKEN:
+    value_from:
+      type: secret
+      secret_fqn: "secret:AGENTSHIELD_AUTH_TOKEN"
 
+# Split probe paths matching the Go server's /health/live (process is up,
+# no dep checks) and /health/ready (LLM provider reachable). Using the
+# legacy /health alias would treat the pod as unready whenever Ollama
+# blinks, causing pointless restart cycles.
 liveness_probe:
   type: http
-  path: /health
+  path: /health/live
   port: 8080
   initial_delay_seconds: 10
   period_seconds: 15
 
 readiness_probe:
   type: http
-  path: /health
+  path: /health/ready
   port: 8080
   initial_delay_seconds: 5
   period_seconds: 10

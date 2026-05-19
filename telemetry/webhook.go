@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,12 +24,21 @@ type WebhookEvent struct {
 	Timestamp  time.Time `json:"timestamp"`
 }
 
+// maxInFlightWebhookFires caps concurrent webhook POSTs so an attacker
+// who can drive rapid CB state transitions (e.g. chaos cycling) can't
+// fan out an unbounded goroutine swarm — both a server-side resource
+// spike and an amplifier against the configured webhook target.
+const maxInFlightWebhookFires = 32
+
 // WebhookDispatcher sends events to a configurable HTTP endpoint.
-// All dispatches are non-blocking (goroutine + timeout).
+// All dispatches are non-blocking (goroutine + timeout), capped by a
+// semaphore so the goroutine count stays bounded under burst.
 type WebhookDispatcher struct {
-	mu     sync.RWMutex
-	url    string
-	client *http.Client
+	mu              sync.RWMutex
+	url             string
+	client          *http.Client
+	sem             chan struct{}
+	lastDropLogNano atomic.Int64 // throttled WARN — see Fire()
 }
 
 func NewWebhookDispatcher() *WebhookDispatcher {
@@ -41,6 +52,7 @@ func NewWebhookDispatcher() *WebhookDispatcher {
 				return http.ErrUseLastResponse
 			},
 		},
+		sem: make(chan struct{}, maxInFlightWebhookFires),
 	}
 }
 
@@ -77,7 +89,31 @@ func (w *WebhookDispatcher) Fire(event WebhookEvent) {
 		return
 	}
 
+	// Drop the fire (return immediately) if the in-flight cap is full.
+	// Webhooks are best-effort observability — preferable to a goroutine
+	// fan-out spike during a chaos burst. The metric records every drop;
+	// we also log a WARN at most once per second so an attacker driving
+	// rapid CB transitions can't hide real events under a silent flood
+	// (round-9 audit), while sustained-drop bursts don't drown the log.
+	select {
+	case w.sem <- struct{}{}:
+	default:
+		WebhookDroppedTotal.Inc()
+		now := time.Now().UnixNano()
+		last := w.lastDropLogNano.Load()
+		if now-last > int64(time.Second) && w.lastDropLogNano.CompareAndSwap(last, now) {
+			slog.Default().Warn("webhook dispatch dropped",
+				slog.String("reason", "in-flight semaphore full"),
+				slog.Int("cap", maxInFlightWebhookFires),
+				slog.String("event", event.Event),
+				slog.String("model", event.Model))
+		}
+		return
+	}
+
 	go func() {
+		defer func() { <-w.sem }()
+
 		body, err := json.Marshal(event)
 		if err != nil {
 			return

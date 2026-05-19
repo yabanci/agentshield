@@ -6,17 +6,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/yabanci/agentshield/config"
 )
 
-const ollamaEmbedModel = "nomic-embed-text"
+// defaultOllamaEmbedModel is used when ProviderConfig.EmbedModel is unset.
+// nomic-embed-text ships in the Quick Start so this default keeps existing
+// deployments working without configuration.
+const defaultOllamaEmbedModel = "nomic-embed-text"
 
 type OllamaProvider struct {
-	http    *http.Client
-	baseURL string
+	http       *http.Client
+	streamHTTP *http.Client // longer timeout for streaming generations
+	baseURL    string
+	embedModel string
 }
 
 type ollamaRequest struct {
@@ -40,15 +46,44 @@ type ollamaEmbedResponse struct {
 }
 
 // NewOllama constructs a provider talking to an Ollama backend at cfg.BaseURL.
-// Timeout defaults to 60s if cfg.Timeout is zero.
+// Timeout defaults to 60s if cfg.Timeout is zero. EmbedModel defaults to
+// "nomic-embed-text" if not set on cfg — overridable so an operator can
+// run a different embedding model without modifying source.
 func NewOllama(cfg config.ProviderConfig) *OllamaProvider {
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
+	embedModel := cfg.EmbedModel
+	if embedModel == "" {
+		embedModel = defaultOllamaEmbedModel
+	}
+	// Custom transport with a short DIAL timeout: when Ollama is down,
+	// each tier's HTTP call would otherwise wait for the OS-level connect
+	// timeout (typically ~75s on macOS, ~21s on Linux) before falling
+	// through to the next tier. That makes graceful denial take 1.8+
+	// seconds — round-11 smoke test caught it. 300 ms is well above any
+	// realistic local-network latency and lets the orchestrator move
+	// through all four tiers in under a second.
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   300 * time.Millisecond,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        20,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 5 * time.Second,
+	}
 	return &OllamaProvider{
-		http:    &http.Client{Timeout: timeout},
-		baseURL: cfg.BaseURL,
+		http: &http.Client{Transport: transport, Timeout: timeout},
+		// streamHTTP is a separate client because streaming has a much longer
+		// upper bound than a non-streaming Generate. Reusing across calls
+		// keeps connections in the pool and avoids the fd leak from
+		// constructing a fresh client on every Stream invocation. Shares
+		// the dial timeout — only the overall request budget differs.
+		streamHTTP: &http.Client{Transport: transport, Timeout: 120 * time.Second},
+		baseURL:    cfg.BaseURL,
+		embedModel: embedModel,
 	}
 }
 
@@ -99,8 +134,7 @@ func (o *OllamaProvider) Stream(ctx context.Context, req Request, out chan<- str
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	streamClient := &http.Client{Timeout: 120 * time.Second}
-	resp, err := streamClient.Do(httpReq)
+	resp, err := o.streamHTTP.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("ollama stream call: %w", err)
 	}
@@ -132,7 +166,7 @@ func (o *OllamaProvider) Stream(ctx context.Context, req Request, out chan<- str
 }
 
 func (o *OllamaProvider) Embed(ctx context.Context, text string) ([]float64, error) {
-	body, err := json.Marshal(ollamaEmbedRequest{Model: ollamaEmbedModel, Prompt: text})
+	body, err := json.Marshal(ollamaEmbedRequest{Model: o.embedModel, Prompt: text})
 	if err != nil {
 		return nil, fmt.Errorf("embed marshal: %w", err)
 	}

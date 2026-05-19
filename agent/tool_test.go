@@ -64,6 +64,26 @@ func TestCalculateTool_Errors(t *testing.T) {
 	}
 }
 
+// TestCalculateTool_RejectsTrailingGarbage is the regression test for the
+// round-3 finding. Pre-fix, `evalExpr("2+3 BOGUS")` returned 5.0 with no
+// error because parseExpr stopped at the first non-operator token and
+// the caller never checked whether the input was fully consumed.
+func TestCalculateTool_RejectsTrailingGarbage(t *testing.T) {
+	tool := &agent.ExposedCalculateTool{}
+	ctx := context.Background()
+	cases := []string{
+		"2+3 BOGUS",
+		"4*5 garbage",
+		"sqrt(9) extra",
+	}
+	for _, expr := range cases {
+		_, err := tool.Execute(ctx, map[string]any{"expression": expr})
+		if err == nil {
+			t.Errorf("expression %q should error on trailing garbage, got success", expr)
+		}
+	}
+}
+
 func TestGetTimeTool(t *testing.T) {
 	tool := &agent.ExposedGetTimeTool{}
 	ctx := context.Background()

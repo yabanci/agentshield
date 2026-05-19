@@ -60,3 +60,20 @@ hr{border:none;border-top:1px solid #1f2937;margin:12px 0}
 .cl-response-degraded{color:#fca5a5}.cl-action{color:#f97316;font-weight:600}.cl-done{color:#34d399;font-weight:700}
 .tools-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
 .tool-chip{padding:3px 10px;background:#1f2937;border-radius:20px;font-size:11px;color:#9ca3af;border:1px solid #374151}
+
+/* Tab buttons are <button> for a11y; reset native button chrome so they
+ * still look like the original divs. Round-6 frontend audit. */
+button.tab{background:none;border:none;border-bottom:2px solid transparent;font-family:inherit;outline-offset:-2px}
+button.tab:focus-visible{outline:2px solid #3b82f6;outline-offset:-2px}
+
+/* Mobile / narrow viewport. Pre-fix: hardcoded 1fr 360px grid meant the
+ * right column wrapped under the left below ~900px and read as broken.
+ * Below 900px, stack the two columns and let the right side flow. */
+@media (max-width: 900px){
+  .grid{grid-template-columns:1fr;padding:12px;gap:12px}
+  .demo-grid{grid-template-columns:1fr 1fr}
+}
+@media (max-width: 520px){
+  .header{padding:10px 16px}
+  .header h1{font-size:16px}
+}

@@ -46,6 +46,11 @@ var (
 		Help: "Number of times a hedge request was fired",
 	})
 
+	WebhookDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "agentshield_webhook_dropped_total",
+		Help: "Webhook events dropped because the dispatcher in-flight cap was full",
+	})
+
 	QualityGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "agentshield_quality_score",
 		Help: "Latest semantic quality score per model (0=trash, 1=perfect)",

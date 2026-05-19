@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -45,11 +46,17 @@ func validatePrompt(prompt string) (int, string, bool) {
 type Handler struct {
 	agent     *agent.Agent
 	cfg       *config.Config
+	log       *slog.Logger
 	ipLimiter *ipLimiter
 }
 
 func New(a *agent.Agent, cfg *config.Config) *Handler {
-	return &Handler{agent: a, cfg: cfg, ipLimiter: newIPLimiter()}
+	return &Handler{
+		agent:     a,
+		cfg:       cfg,
+		log:       slog.Default().With(slog.String("component", "api")),
+		ipLimiter: newIPLimiterWithProxies(cfg.TrustedProxies),
+	}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -74,15 +81,26 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health/ready", h.healthReady)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	// Demo controls (auth-gated when AGENTSHIELD_AUTH_TOKEN is set)
-	mux.HandleFunc("POST /demo/kill", h.requireAuth(h.killPrimary))
-	mux.HandleFunc("POST /demo/restore", h.requireAuth(h.restorePrimary))
-	mux.HandleFunc("POST /demo/kill-fallback", h.requireAuth(h.killFallback))
-	mux.HandleFunc("POST /demo/restore-fallback", h.requireAuth(h.restoreFallback))
-	mux.HandleFunc("POST /demo/chaos", h.requireAuth(h.startChaos))
-	mux.HandleFunc("GET /demo/chaos/stream", h.requireAuth(h.chaosStream))
-	mux.HandleFunc("POST /demo/degrade", h.requireAuth(h.enableDegrade))
-	mux.HandleFunc("POST /demo/restore-quality", h.requireAuth(h.disableDegrade))
+	// Compare — fires shielded + raw concurrently. Tighter rate limit than
+	// /chat (10/min vs 60/min) because each call costs 2x LLM + 6x embed.
+	mux.HandleFunc("POST /demo/compare", h.ipLimiter.compareMiddleware(h.compare))
+
+	// Demo controls. Each endpoint wraps requireAuth in the per-IP compare
+	// rate limiter (10/min, sliding window). When AGENTSHIELD_AUTH_TOKEN
+	// is set the token check is authoritative; when it's unset (recommended
+	// only for LOCAL recording), the rate limit caps the adversary at 10
+	// kills/minute from any one IP. Sliding-window allows a small burst
+	// rather than a strict tarpit. Combined with the non-resetting
+	// auto-restore in orchestrator/chaos.go the worst-case interruption
+	// is 5 minutes regardless of subsequent kills.
+	mux.HandleFunc("POST /demo/kill", h.ipLimiter.compareMiddleware(h.requireAuth(h.killPrimary)))
+	mux.HandleFunc("POST /demo/restore", h.ipLimiter.compareMiddleware(h.requireAuth(h.restorePrimary)))
+	mux.HandleFunc("POST /demo/kill-fallback", h.ipLimiter.compareMiddleware(h.requireAuth(h.killFallback)))
+	mux.HandleFunc("POST /demo/restore-fallback", h.ipLimiter.compareMiddleware(h.requireAuth(h.restoreFallback)))
+	mux.HandleFunc("POST /demo/chaos", h.ipLimiter.compareMiddleware(h.requireAuth(h.startChaos)))
+	mux.HandleFunc("GET /demo/chaos/stream", h.ipLimiter.compareMiddleware(h.requireAuth(h.chaosStream)))
+	mux.HandleFunc("POST /demo/degrade", h.ipLimiter.compareMiddleware(h.requireAuth(h.enableDegrade)))
+	mux.HandleFunc("POST /demo/restore-quality", h.ipLimiter.compareMiddleware(h.requireAuth(h.disableDegrade)))
 
 	// Auth discovery for the dashboard
 	mux.HandleFunc("GET /auth/required", h.authRequired)
@@ -135,7 +153,10 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 		resp, err = h.agent.Ask(ctx, req.Prompt)
 	}
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		// Errors from the provider often embed the upstream URL (Ollama or
+		// OpenAI base URL). Don't propagate that to the public response.
+		h.log.Warn("chat request failed", "err", err)
+		jsonError(w, "request failed", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, resp)
@@ -233,7 +254,8 @@ func (h *Handler) react(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.agent.React(ctx, req.Prompt, sessionID)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		h.log.Warn("react request failed", "err", err)
+		jsonError(w, "request failed", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, resp)
@@ -328,21 +350,47 @@ func (h *Handler) disableDegrade(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"result": "degrade mode OFF — primary restored"})
 }
 
+func (h *Handler) compare(w http.ResponseWriter, r *http.Request) {
+	var req chatRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, MaxPromptBytes+1024)).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if code, msg, ok := validatePrompt(req.Prompt); !ok {
+		jsonError(w, msg, code)
+		return
+	}
+	// Compare can take ~2x normal latency because both sides run.
+	// Ceiling is 65s so it can't outlive the server WriteTimeout (70s) —
+	// pre-fix it was 90s, which combined with a held-open TCP session
+	// kept both goroutines running for 20s past WriteTimeout.
+	ctx, cancel := context.WithTimeout(r.Context(), 65*time.Second)
+	defer cancel()
+	// Clear per-request write deadline so a slow LLM doesn't fail the
+	// final flush before we return JSON.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+	jsonOK(w, h.agent.Compare(ctx, req.Prompt))
+}
+
 func (h *Handler) startChaos(w http.ResponseWriter, r *http.Request) {
-	// Non-blocking: return 202, chaos runs in background.
-	// Use the agent's lifetime context so chaos terminates on server shutdown
-	// rather than running forever (would block clean exit).
+	// Non-blocking: chaos runs in the background under the agent's lifetime
+	// context so it terminates on shutdown rather than wedging exit.
 	_, err := h.agent.StartChaos(h.agent.LifecycleContext())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusConflict)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
+	// 200 + JSON body so downstream tooling sees Content-Type: application/json.
+	// Pre-fix this wrote 202 first, which made jsonOK's Content-Type Set() a
+	// no-op (headers already committed) — clients got JSON without the header.
 	jsonOK(w, map[string]string{"result": "chaos scenario started — stream at /demo/chaos/stream"})
 }
 
-// chaosStream streams chaos events via SSE.
-// The client connects, starts chaos via POST /demo/chaos, then watches here.
+// chaosStream streams chaos events via SSE. Connecting here starts the
+// chaos scenario AND streams events back; `POST /demo/chaos` is the
+// alternative non-streaming trigger. Calling both produces 409 because
+// only one scenario runs at a time — dashboards use only this endpoint.
 func (h *Handler) chaosStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -372,7 +420,16 @@ func (h *Handler) chaosStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			data, _ := json.Marshal(event)
+			data, err := json.Marshal(event)
+			if err != nil {
+				// ChaosEvent has only serializable fields today, but a
+				// future signature change must not silently emit blank
+				// SSE frames; surface and bail so the client sees EOF
+				// rather than an opaque hang.
+				h.log.Error("chaos event marshal failed",
+					slog.String("type", event.Type), slog.Any("err", err))
+				return
+			}
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 			if event.Type == "done" {
@@ -391,6 +448,25 @@ func (h *Handler) getTrace(w http.ResponseWriter, r *http.Request) {
 	tr := h.agent.GetTrace(id)
 	if tr == nil {
 		jsonError(w, "trace not found", http.StatusNotFound)
+		return
+	}
+	// When AGENTSHIELD_AUTH_TOKEN is unset, requireAuth on this route is a
+	// no-op and any visitor with a trace ID can pull the verbatim prompt.
+	// Trace IDs flow back in every /chat /react /demo/compare response and
+	// into the dashboard event log, so a shoulder-surf on the demo screen
+	// exfiltrates user prompts. Strip Prompt for unauthed callers; full
+	// trace (including Prompt) is available only when a token gated entry.
+	if !h.AuthEnabled() {
+		// Build a flat view by hand — Trace embeds a sync.Mutex so
+		// `safe := *tr` would copy the lock (go vet refuses that).
+		jsonOK(w, map[string]any{
+			"id":         tr.ID,
+			"prompt":     "", // scrubbed
+			"total_ms":   tr.TotalMS,
+			"final_tier": tr.FinalTier,
+			"steps":      tr.Steps,
+			"created_at": tr.CreatedAt,
+		})
 		return
 	}
 	jsonOK(w, tr)

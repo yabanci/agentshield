@@ -45,7 +45,19 @@ func main() {
 	if cfg.AuthToken == "" {
 		logger.Warn("AGENTSHIELD_AUTH_TOKEN is unset — /demo/*, /sessions/*, " +
 			"/trace/*, and /config/webhook are open to anonymous callers. " +
-			"Required in any deployment a third party can reach.")
+			"Required in any deployment a third party can reach. " +
+			"(Kill/degrade actions auto-restore after 5 minutes regardless.)")
+	}
+
+	// Discoverability warning for the OpenAI-only case: if the chat backend
+	// is OpenAI but no OpenAI embedding model is set, every embedding will
+	// route to Ollama at localhost. Judges deploying purely against OpenAI
+	// previously saw a silent semantic-cache failure with no explanation.
+	if cfg.Provider.Kind == "openai" && cfg.Provider.EmbedModel == "" {
+		logger.Warn("LLM_PROVIDER=openai but OPENAI_EMBED_MODEL is unset. " +
+			"Embeddings will require Ollama reachable at " +
+			"http://localhost:11434. Set OPENAI_EMBED_MODEL=text-embedding-3-small " +
+			"to route embeddings through OpenAI instead.")
 	}
 
 	go func() {
