@@ -458,7 +458,10 @@ agentshield_cache_hits_total                   counter
 agentshield_loadshed_total                     counter
 agentshield_bulkhead_full_total{type}          counter
 agentshield_hedge_fires_total                  counter
+agentshield_webhook_dropped_total             counter
 ```
+
+> **Observability:** A production-grade Grafana 10 dashboard (14 panels across 4 rows: request flow, quality, latency, defenses) and 7 Prometheus alert rules with runbook URLs live in [`deploy/grafana/`](./deploy/grafana/) — import the JSON in one drag-and-drop, apply the PrometheusRule CRD or `rule_files:` entry, and every signal above has a panel and at least one alert threshold.
 
 ---
 
