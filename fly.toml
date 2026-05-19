@@ -1,0 +1,64 @@
+# fly.toml — AgentShield deploy config for Fly.io.
+#
+# Companion to the Dockerfile in the repo root. Use this when shipping the
+# hackathon demo on Fly's free hobby tier; see docs/deploy-runbook.md §2 for
+# the full step-by-step flow (auth, secrets, region choice, rollback).
+#
+# App name `agentshield` is taken globally on Fly — rename below before
+# running `flyctl launch` if you fork this. Region `fra` (Frankfurt) is the
+# closest Fly POP to Almaty and acceptable from US-West where the judges
+# sit; swap to `sjc` if you only care about North America latency.
+#
+# Secrets are NOT in this file. Set them once via:
+#   flyctl secrets set OPENAI_API_KEY=...
+#   flyctl secrets set AGENTSHIELD_AUTH_TOKEN=...
+
+app = "agentshield"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Non-secret runtime config. Multi-provider knobs route the agent through
+  # Groq's OpenAI-compatible endpoint — fast free tier, no GPU on Fly needed.
+  # Override any of these via `flyctl secrets set` (they'll take precedence).
+  PORT = "8080"
+  LLM_PROVIDER = "openai"
+  OPENAI_BASE_URL = "https://api.groq.com/openai/v1"
+  OPENAI_PRIMARY_MODEL = "llama-3.3-70b-versatile"
+  OPENAI_FALLBACK_MODEL = "llama-3.1-8b-instant"
+  # Empty embed model = semantic cache falls back to exact match. Groq
+  # doesn't serve embeddings so this is intentional; the resilience demo
+  # still works because every tier upstream of cache is exercised.
+  OPENAI_EMBED_MODEL = ""
+  # Sentinel — Config validation requires OLLAMA_URL to parse even when
+  # LLM_PROVIDER=openai (we don't gate the field on provider yet).
+  OLLAMA_URL = "http://unused:11434"
+  LOG_FORMAT = "json"
+  LOG_LEVEL = "info"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Keep one machine always running so judges don't hit a 3-second cold
+  # start on their first click. Fly bills per-second of CPU but a single
+  # 256 MB shared-cpu-1x machine fits comfortably under the hobby tier
+  # free allowance.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "get"
+    path = "/health/live"
+    protocol = "http"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpus = 1
