@@ -28,6 +28,29 @@ type Config struct {
 	Score     ScoreConfig
 	MCP       MCPConfig
 	OTel      OTelConfig
+	ToolCache ToolCacheConfig
+	ReAct     ReActConfig
+}
+
+// ToolCacheConfig controls the per-session, in-memory tool result cache that
+// eliminates redundant round-trips when the ReAct loop calls the same tool
+// with identical inputs within one chat turn.
+type ToolCacheConfig struct {
+	// Enabled toggles the cache. Default true.
+	// Read from AGENTSHIELD_TOOL_CACHE_ENABLED.
+	Enabled bool
+	// MaxEntries caps the per-session LRU cache. Default 64.
+	// Read from AGENTSHIELD_TOOL_CACHE_MAX_ENTRIES.
+	MaxEntries int
+}
+
+// ReActConfig controls the ReAct loop's long-session behaviour.
+type ReActConfig struct {
+	// MaxTranscriptTokens is the estimated token threshold above which the
+	// running Thought/Action/Observation transcript is summarized before the
+	// next LLM call. Default 6000.
+	// Read from AGENTSHIELD_REACT_MAX_TRANSCRIPT_TOKENS.
+	MaxTranscriptTokens int
 }
 
 // OTelConfig holds OpenTelemetry exporter settings.
@@ -240,6 +263,13 @@ func Defaults() *Config {
 			// HyperDX dev) almost never run TLS. Set to false in production.
 			Insecure: true,
 			Timeout:  10 * time.Second,
+		},
+		ToolCache: ToolCacheConfig{
+			Enabled:    true,
+			MaxEntries: 64,
+		},
+		ReAct: ReActConfig{
+			MaxTranscriptTokens: 6000,
 		},
 	}
 }

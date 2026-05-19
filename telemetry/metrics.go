@@ -60,6 +60,34 @@ var (
 		Name: "agentshield_semantic_cb_state",
 		Help: "Semantic circuit breaker state: 0=healthy 1=degraded 2=failing",
 	}, []string{"model"})
+
+	// ToolCacheHitsTotal counts per-session tool cache hits by tool name.
+	// A hit means an identical (normalized) call was answered without an LLM round-trip.
+	ToolCacheHitsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "agentshield_tool_cache_hits_total",
+		Help: "Per-session tool result cache hits, by tool name (lowercase)",
+	}, []string{"tool"})
+
+	// ToolCacheMissesTotal counts per-session tool cache misses by tool name.
+	ToolCacheMissesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "agentshield_tool_cache_misses_total",
+		Help: "Per-session tool result cache misses, by tool name (lowercase)",
+	}, []string{"tool"})
+
+	// ReactSummarizationsTotal counts how often the transcript summarization path fires.
+	ReactSummarizationsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "agentshield_react_summarizations_total",
+		Help: "Number of times the ReAct transcript was summarized (threshold exceeded)",
+	})
+
+	// ReactTranscriptTokens observes the estimated transcript token count at
+	// each iteration, before any summarization, so operators can tune
+	// MaxTranscriptTokens against their workload distribution.
+	ReactTranscriptTokens = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "agentshield_react_transcript_tokens",
+		Help:    "Estimated token count of the ReAct running transcript at each iteration",
+		Buckets: []float64{500, 1000, 2000, 4000, 6000, 8000},
+	})
 )
 
 // CBStateValue converts a transport-breaker state string to a metric value.
