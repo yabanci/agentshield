@@ -191,55 +191,125 @@ echo "$LIVE_URL" > ~/.agentshield-live-url
 
 ---
 
-## 2. Fly.io path (backup — if TrueFoundry fails)
+## 2. Fly.io path (backup — if TrueFoundry fails or you want guaranteed-free)
 
-Fly.io is well-tested for Go services and gives a free `*.fly.dev` subdomain.
+The repo ships an `fly.toml` already configured for Groq via the OpenAI-compatible adapter. Free hobby tier covers a single 256 MB always-on machine in Frankfurt (closest Fly POP to Almaty, acceptable latency from US-West where judges sit).
+
+### 2.1 Install + auth (one-time)
 
 ```bash
-# Install flyctl (Homebrew or curl)
 brew install flyctl
 # or: curl -L https://fly.io/install.sh | sh
 
-# One-time signup/login (browser flow)
-flyctl auth login
+flyctl version   # confirm v0.4+
 
-# Initialise the app — answer NO when it asks "Deploy now?"
-cd ~/projects/pet/agentshield
-flyctl launch --no-deploy --name agentshield --region sjc
-# This writes fly.toml — edit it before deploying:
-#   [http_service] internal_port = 8080
-#   [http_service.checks] path = "/health/live"
+# Browser-based signup/login. Fly requires a credit card for verification
+# but does NOT bill for usage that fits in the hobby tier free allowance.
+flyctl auth login
+# If the browser doesn't open on macOS, copy the URL flyctl prints and paste
+# it into Safari/Chrome manually.
+
+flyctl auth whoami   # confirms login
 ```
 
-Then set secrets and deploy:
+### 2.2 Create the app (one-time)
 
 ```bash
-flyctl secrets set \
-  AGENTSHIELD_AUTH_TOKEN="$AS_TOKEN" \
-  LLM_PROVIDER="openai" \
-  OPENAI_BASE_URL="https://api.groq.com/openai/v1" \
-  OPENAI_API_KEY="gsk_..." \
-  OPENAI_PRIMARY_MODEL="llama-3.3-70b-versatile" \
-  OPENAI_FALLBACK_MODEL="llama-3.1-8b-instant" \
-  OLLAMA_URL="http://unused:11434"
+cd ~/projects/pet/agentshield
 
-flyctl deploy
+# The `agentshield` app name may already be taken globally on Fly. If so,
+# flyctl will tell you and prompt for a new name — edit fly.toml's `app =`
+# line to match (e.g. `agentshield-yabanci`) before re-running.
+flyctl apps create agentshield --org personal
 
-# URL appears in the output, e.g. https://agentshield.fly.dev
-export LIVE_URL="https://agentshield.fly.dev"
-
-# Same smoke test as step 1.5
-flyctl logs --app agentshield   # tail logs while testing
+# Allocate a free shared IPv4 (required for the public URL).
+# v6 is free + always allocated; v4 is shared (free, port 443/80 only).
+flyctl ips allocate-v4 --shared --app agentshield
 ```
 
-Fly's free tier is sufficient for a demo. If memory is tight, bump in `fly.toml`:
+### 2.3 Set secrets
 
-```toml
-[[vm]]
-  memory_mb = 512
-  cpu_kind = "shared"
-  cpus = 1
+```bash
+# Groq API key — from ~/.groq-token (see Section 0 pre-flight)
+flyctl secrets set OPENAI_API_KEY="$(cat ~/.groq-token)" --app agentshield
+
+# AgentShield auth token — gates /demo/*, /sessions/*, /trace/{id}
+flyctl secrets set AGENTSHIELD_AUTH_TOKEN="$AS_TOKEN" --app agentshield
+
+# Verify both are listed (values are hashed in the output, never plaintext)
+flyctl secrets list --app agentshield
 ```
+
+The non-secret env (`LLM_PROVIDER`, `OPENAI_BASE_URL`, model names, `OLLAMA_URL=http://unused:11434`, etc.) is already in `fly.toml`'s `[env]` block — no need to re-set as secrets.
+
+### 2.4 Deploy
+
+```bash
+flyctl deploy --app agentshield --remote-only
+# --remote-only forces the build on Fly's builder, not your laptop.
+# Useful if local Docker is being weird. Drop the flag to build locally.
+```
+
+This takes 2-4 minutes the first time (image upload + builder spin-up). Subsequent deploys cache layers and run in ~60s.
+
+### 2.5 Verify
+
+```bash
+export LIVE_URL="https://agentshield.fly.dev"   # or whatever app name you used
+
+# Liveness
+curl -fsS "$LIVE_URL/health/live"
+
+# Readiness — exercises the LLM provider; first call after deploy may take
+# a few seconds while Groq's API warms up
+curl -fsS "$LIVE_URL/health/ready"
+
+# Metrics (must be unauthenticated for Prometheus scrapers)
+curl -fsS "$LIVE_URL/metrics" | head -10
+
+# Auth gate
+curl -i -X POST "$LIVE_URL/demo/kill"
+# Expect: HTTP/1.1 401
+
+curl -i -X POST "$LIVE_URL/demo/kill" -H "Authorization: Bearer $AS_TOKEN"
+# Expect: HTTP/1.1 200
+
+curl -fsS -X POST "$LIVE_URL/demo/restore" -H "Authorization: Bearer $AS_TOKEN"
+
+# End-to-end chat through Groq llama-3.3-70b
+curl -fsS -X POST "$LIVE_URL/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "what is 2+2?"}'
+# Expect: {"text":"...","tier":"primary","cached":false,"trace_id":"tr_..."}
+```
+
+### 2.6 Logs + status
+
+```bash
+flyctl logs --app agentshield              # tail logs
+flyctl status --app agentshield            # machine state + IPs
+flyctl machine list --app agentshield      # which machines exist
+flyctl dashboard --app agentshield         # opens web dashboard
+```
+
+### 2.7 Capture URL for Devpost + recording
+
+```bash
+echo "$LIVE_URL" > ~/.agentshield-live-url
+# Paste into:
+#   - Devpost submission "Try it" field
+#   - README.md (if there's a "Live demo" placeholder)
+#   - docs/devpost-submission.md
+```
+
+### 2.8 Free-tier guardrails
+
+Fly bills per-second; the hobby tier covers a small footprint without charge. To stay safely free:
+
+- **Memory:** keep `[[vm]] memory = "256mb"` (in `fly.toml`). Bumping to 512mb pushes you into paid territory if you also run for the full month.
+- **Machine count:** `min_machines_running = 1`. Don't scale up. If you want a second region for fun, scale-down afterwards (`flyctl scale count 1 --app agentshield`).
+- **Bandwidth:** hobby gives 160 GB/mo. Demo traffic won't approach this; chaos demo loops might if left running for days.
+- **Always check:** `flyctl billing show` once a week.
 
 ---
 
