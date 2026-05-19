@@ -174,7 +174,7 @@ curl -fsS -X POST "$LIVE_URL/demo/restore" -H "Authorization: Bearer $AS_TOKEN"
 # Smoke test the chat endpoint
 curl -fsS -X POST "$LIVE_URL/chat" \
   -H "Content-Type: application/json" \
-  -d '{"message": "what is 2+2?"}'
+  -d '{"prompt": "what is 2+2?"}'
 ```
 
 If chat returns a sensible answer, you're done.
