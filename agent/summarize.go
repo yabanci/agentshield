@@ -82,6 +82,22 @@ func (a *Agent) summarizeTranscript(iterCtx context.Context, transcript string, 
 	if estimateTokens(result) >= beforeTokens {
 		result = abbreviate(older) + "\n" + recent
 	}
+	// Round-14 follow-up: abbreviate(older) can still equal beforeTokens when
+	// older consists of many short Observations that all fit within the 10 KB
+	// cap. Final hard guarantee: keep the tail (most-recent content) and drop
+	// the head so both token-count AND byte-length shrink strictly.
+	if estimateTokens(result) >= beforeTokens {
+		// Target ~half of the original byte length. Char-based truncation
+		// preserves whitespace structure (newlines, indentation) where word
+		// truncation would not.
+		targetChars := len(transcript) / 2
+		if targetChars < 64 {
+			targetChars = 64
+		}
+		if len(result) > targetChars {
+			result = "[truncated]\n" + result[len(result)-targetChars:]
+		}
+	}
 	span.SetAttributes(attribute.Int("after.tokens", estimateTokens(result)))
 	return result
 }
