@@ -59,6 +59,9 @@ func LoadFromEnv() (*Config, error) {
 	if v := os.Getenv("AGENTSHIELD_AUTH_TOKEN"); v != "" {
 		c.AuthToken = v
 	}
+	if v := os.Getenv("AGENTSHIELD_TRUSTED_PROXIES"); v != "" {
+		c.TrustedProxies = v
+	}
 	// MCP integration. Optional 5th ReAct tool (mcp_lookup) wires through
 	// the existing per-tool CB. Unset = MCP disabled, default ReAct tool
 	// set unchanged. For the demo we ship cmd/mcp-mock/ which exposes

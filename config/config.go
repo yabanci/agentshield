@@ -11,8 +11,13 @@ import (
 )
 
 type Config struct {
-	Port      string
-	AuthToken string
+	Port           string
+	AuthToken      string
+	// TrustedProxies is a comma-separated CIDR list. When the TCP peer
+	// falls inside any of these ranges, the ratelimit middleware honors
+	// X-Forwarded-For / X-Real-IP. Empty (default) = headers ignored,
+	// peer address always used. Read from AGENTSHIELD_TRUSTED_PROXIES.
+	TrustedProxies string
 	Logger    LoggerConfig
 	Provider  ProviderConfig
 	Models    ModelsConfig

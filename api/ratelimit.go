@@ -8,7 +8,6 @@ package api
 import (
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -39,13 +38,24 @@ type ipEntry struct {
 	lastUsed time.Time
 }
 
+// newIPLimiter constructs a limiter with no trusted proxies. Use
+// newIPLimiterWithProxies (or set trustedProxies after construction) when
+// behind a known reverse proxy.
 func newIPLimiter() *ipLimiter {
 	return &ipLimiter{
-		limiters:       make(map[string]*ipEntry),
-		limit:          defaultIPRateLimit,
-		window:         defaultIPRateWindow,
-		trustedProxies: loadTrustedProxies(os.Getenv("AGENTSHIELD_TRUSTED_PROXIES")),
+		limiters: make(map[string]*ipEntry),
+		limit:    defaultIPRateLimit,
+		window:   defaultIPRateWindow,
 	}
+}
+
+// newIPLimiterWithProxies parses a comma-separated CIDR list (typically
+// from cfg.TrustedProxies) and installs the proxy allow-list. Empty
+// string = same as newIPLimiter().
+func newIPLimiterWithProxies(cidrList string) *ipLimiter {
+	l := newIPLimiter()
+	l.trustedProxies = loadTrustedProxies(cidrList)
+	return l
 }
 
 // loadTrustedProxies parses a comma-separated list of CIDR ranges that the

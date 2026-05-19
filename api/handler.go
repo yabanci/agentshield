@@ -55,7 +55,7 @@ func New(a *agent.Agent, cfg *config.Config) *Handler {
 		agent:     a,
 		cfg:       cfg,
 		log:       slog.Default().With(slog.String("component", "api")),
-		ipLimiter: newIPLimiter(),
+		ipLimiter: newIPLimiterWithProxies(cfg.TrustedProxies),
 	}
 }
 
