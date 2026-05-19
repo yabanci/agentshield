@@ -108,6 +108,21 @@ func counterValue(t *testing.T, c interface {
 	return m.Counter.GetValue()
 }
 
+// TestSummarize_HardTruncateGuarantee (round-14 follow-up) verifies the final
+// shrink guarantee fires when both prior guards fail to reduce size. With many
+// short Observation lines that all fit in abbreviate's 10 KB cap, the first two
+// branches return a result roughly equal to the original; the third branch
+// must hard-truncate so the result is strictly smaller.
+func TestSummarize_HardTruncateGuarantee(t *testing.T) {
+	a := agent.NewWithOllamaURL("http://127.0.0.1:1") // unreachable → fallback path
+	transcript := strings.Repeat("Observation: x\n", 400)
+	before := len(transcript)
+	got := a.SummarizeTranscript(context.Background(), transcript, 1)
+	if len(got) >= before {
+		t.Errorf("hard-truncate guarantee broken: before=%d after=%d", before, len(got))
+	}
+}
+
 // TestSummarize_RecentIterationPreserved verifies the most-recent iteration
 // is never overwritten by the summary.
 func TestSummarize_RecentIterationPreserved(t *testing.T) {

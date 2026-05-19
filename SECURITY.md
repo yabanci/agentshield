@@ -4,7 +4,7 @@
 
 AgentShield is built for a hackathon track that specifically asks "how does
 your agent behave when things go wrong." Security is part of that
-question, so the project has been put through **eleven rounds of
+question, so the project has been put through **fourteen rounds of
 multi-agent audit** focused on different threat surfaces, not just
 correctness. The full audit reports live in `docs/superpowers/` and the
 working notes are in `/Users/arsenozhetov/.claude/jobs/` during
@@ -40,4 +40,4 @@ full trade-off analysis and mitigation options.
 
 ## Audit reports
 
-The eleven round-by-round audit reports are in `/Users/arsenozhetov/.claude/jobs/` and a high-level summary lives in the repo's commit history — each round closes with a `fix: round-N — …` commit listing the findings addressed.
+The fourteen round-by-round audit reports are in `/Users/arsenozhetov/.claude/jobs/` and a high-level summary lives in the repo's commit history — each round closes with a `fix: round-N — …` commit listing the findings addressed.
