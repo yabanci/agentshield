@@ -1,0 +1,115 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentshield
+  labels:
+    app: agentshield
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: agentshield
+      rules:
+        - alert: AgentShieldSemanticBreakerFailing
+          expr: agentshield_semantic_cb_state > 1
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Semantic CB on {{ $labels.model }} is in Failing state"
+            description: >
+              The semantic circuit breaker for model {{ $labels.model }} has been
+              in Failing state for over 2 minutes. Requests are being routed to
+              fallback; users may see degraded response quality if fallback is
+              also impaired.
+            runbook_url: "https://github.com/yabanci/agentshield/blob/main/docs/runbooks/AgentShieldSemanticBreakerFailing.md"
+
+        - alert: AgentShieldTransportBreakerOpen
+          expr: agentshield_cb_state == 2
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Transport CB for {{ $labels.model }} is Open"
+            description: >
+              The transport circuit breaker for model {{ $labels.model }} has been
+              Open for over 2 minutes, indicating sustained HTTP errors or timeouts.
+              All traffic to this model is being redirected; users are served by the
+              fallback tier or graceful denial if the fallback is also open.
+            runbook_url: "https://github.com/yabanci/agentshield/blob/main/docs/runbooks/AgentShieldTransportBreakerOpen.md"
+
+        - alert: AgentShieldFallbackRateHigh
+          expr: >
+            sum(rate(agentshield_requests_total{tier="fallback"}[10m]))
+            /
+            clamp_min(sum(rate(agentshield_requests_total[10m])), 0.001)
+            > 0.30
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Fallback request share exceeds 30% over 10m"
+            description: >
+              More than 30% of requests have been served by the fallback model for
+              10 minutes. The primary model may be degraded or unavailable; fallback
+              responses are typically lower quality and higher latency.
+            runbook_url: "https://github.com/yabanci/agentshield/blob/main/docs/runbooks/AgentShieldFallbackRateHigh.md"
+
+        - alert: AgentShieldGracefulDenialBurst
+          expr: sum(rate(agentshield_requests_total{tier="denied"}[1m])) > 5
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Graceful denials exceeding 5/s for 1 minute"
+            description: >
+              AgentShield is gracefully denying more than 5 requests per second for
+              at least 1 minute. All degradation tiers (primary, fallback, cache) are
+              exhausted or blocked; users are receiving denial responses rather than
+              LLM output. Immediate capacity investigation required.
+            runbook_url: "https://github.com/yabanci/agentshield/blob/main/docs/runbooks/AgentShieldGracefulDenialBurst.md"
+
+        - alert: AgentShieldWebhookDrops
+          expr: increase(agentshield_webhook_dropped_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Webhook events are being dropped"
+            description: >
+              AgentShield has dropped one or more webhook events in the last 5 minutes
+              because the dispatcher in-flight cap was full. Downstream systems
+              subscribed to circuit-breaker state changes may have missed notifications.
+            runbook_url: "https://github.com/yabanci/agentshield/blob/main/docs/runbooks/AgentShieldWebhookDrops.md"
+
+        - alert: AgentShieldP95Spike
+          expr: >
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(agentshield_request_duration_seconds_bucket{tier="primary"}[5m]))
+            ) > 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Primary tier p95 latency above 5s for 5 minutes"
+            description: >
+              The 95th-percentile response time for the primary model tier has exceeded
+              5 seconds for at least 5 minutes. Users are experiencing significantly
+              elevated wait times; hedging and retry overhead may be amplifying the
+              pressure on the LLM backend.
+            runbook_url: "https://github.com/yabanci/agentshield/blob/main/docs/runbooks/AgentShieldP95Spike.md"
+
+        - alert: AgentShieldLoadshedSustained
+          expr: rate(agentshield_loadshed_total[5m]) > 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Load shedder rejecting more than 1 req/s for 5 minutes"
+            description: >
+              The AIMD load shedder has been rejecting more than 1 request per second
+              for 5 consecutive minutes. This indicates sustained overload; users are
+              seeing rejection errors at the entry point before any LLM tier is
+              attempted. Scale capacity or investigate upstream traffic surge.
+            runbook_url: "https://github.com/yabanci/agentshield/blob/main/docs/runbooks/AgentShieldLoadshedSustained.md"
