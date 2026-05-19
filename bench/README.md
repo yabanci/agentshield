@@ -146,6 +146,10 @@ reflects exactly what you would see running `go run ./bench/cmd/bench`.
    breaker state transitions. The quality gate check (score < 0.45 → fallback)
    is what fires in this bench.
 
+### Tool cache + summarization are now part of the AgentShield path
+
+The AgentShield path in this bench exercises the full resilience stack as it ships today, which now includes the per-session tool result cache and transcript summarization. The bench prompt set uses distinct inputs, so the cache hit rate here is 0% — but on realistic workloads where the ReAct loop re-queries the same tool (e.g., `mcp_lookup("flight status LH123")` repeated across iterations), the cache eliminates those round-trips and live latency will be lower than the numbers in `results.csv`. The quality and useful-rate columns are unaffected.
+
 ### The point
 
 The numbers demonstrate the *qualitative* gap:

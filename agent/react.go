@@ -13,6 +13,33 @@ import (
 	"github.com/yabanci/agentshield/telemetry"
 )
 
+// toolCacheEnabled returns true when the agent config enables the per-session
+// tool cache (allows nil-safe access in tests that don't go through LoadFromEnv).
+func (a *Agent) toolCacheEnabled() bool {
+	if a.cfg == nil {
+		return false
+	}
+	return a.cfg.ToolCache.Enabled
+}
+
+// toolCacheMaxEntries returns the per-session LRU cap from config, or the
+// default of 64 when config is absent.
+func (a *Agent) toolCacheMaxEntries() int {
+	if a.cfg == nil || a.cfg.ToolCache.MaxEntries <= 0 {
+		return 64
+	}
+	return a.cfg.ToolCache.MaxEntries
+}
+
+// reactMaxTranscriptTokens returns the summarization threshold from config,
+// or the default of 6000 when config is absent.
+func (a *Agent) reactMaxTranscriptTokens() int {
+	if a.cfg == nil || a.cfg.ReAct.MaxTranscriptTokens <= 0 {
+		return 6000
+	}
+	return a.cfg.ReAct.MaxTranscriptTokens
+}
+
 const maxReactIterations = 6
 
 // reactTracer is the named OTel tracer for ReAct agent spans.
@@ -62,6 +89,10 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 	conversationCtx := fullPrompt
 	tr := a.memory.Traces.New(prompt)
 
+	// Per-session tool result cache — discarded when this React call returns.
+	tc := newToolCache(a.toolCacheMaxEntries(), a.toolCacheEnabled())
+	threshold := a.reactMaxTranscriptTokens()
+
 	// done wraps every return path: finalizes the trace and sets TraceID.
 	done := func(answer string, turns int, tier Tier) ReactResponse {
 		a.memory.Sessions.Add(sessionID, memory.Message{Role: "assistant", Content: answer, Tier: tier, At: nowFn()})
@@ -82,6 +113,14 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 		iterCtx, iterSpan := reactTracer.Start(ctx, "agentshield.react.iteration")
 		iterSpan.SetAttributes(attribute.Int("iteration", i+1))
 
+		// Part B: transcript token accounting + optional summarization.
+		tokens := estimateTokens(conversationCtx)
+		telemetry.ReactTranscriptTokens.Observe(float64(tokens))
+		if tokens >= threshold {
+			telemetry.ReactSummarizationsTotal.Inc()
+			conversationCtx = a.summarizeTranscript(iterCtx, conversationCtx, threshold)
+		}
+
 		resp := a.degrade(iterCtx, conversationCtx, tr)
 		lastTier = resp.Tier
 		raw := strings.TrimSpace(resp.Text)
@@ -101,10 +140,27 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 			inputStr := truncateAttr(marshalArgs(step.ActionInput))
 			toolSpan.SetAttributes(attribute.String("tool.input", inputStr))
 
-			obs, toolErr := tools.Execute(toolCtx, step.Action, step.ActionInput)
-			if toolErr != nil {
-				obs = fmt.Sprintf("Tool error: %v", toolErr)
+			// Part A: check per-session tool cache before calling the tool.
+			toolNameLower := strings.ToLower(step.Action)
+			var obs string
+			if cached, hit := tc.Get(step.Action, inputStr); hit {
+				obs = cached
+				toolSpan.SetAttributes(attribute.Bool("tool.cache.hit", true))
+				telemetry.ToolCacheHitsTotal.WithLabelValues(toolNameLower).Inc()
+			} else {
+				toolSpan.SetAttributes(attribute.Bool("tool.cache.hit", false))
+				telemetry.ToolCacheMissesTotal.WithLabelValues(toolNameLower).Inc()
+				var toolErr error
+				obs, toolErr = tools.Execute(toolCtx, step.Action, step.ActionInput)
+				if toolErr != nil {
+					obs = fmt.Sprintf("Tool error: %v", toolErr)
+				}
+				// Only cache successful (non-error) results.
+				if toolErr == nil {
+					tc.Set(step.Action, inputStr, obs)
+				}
 			}
+
 			toolSpan.SetAttributes(attribute.Int("tool.output.len", len(obs)))
 			toolSpan.End()
 

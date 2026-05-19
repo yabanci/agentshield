@@ -84,11 +84,15 @@ A surprising amount of resilience design is **demo design**. The chaos scenario,
 
 ## What's next
 
-- **OpenTelemetry trace propagation** to outbound LLM/MCP calls so cross-service spans connect.
 - **Grafana dashboard JSON + Prometheus alert rules** shipped alongside the Helm chart.
-- **Tool-cache and conversation summarization** for ReAct sessions over 20 messages.
 - **Pluggable factual-accuracy detector** as an optional add-on for use cases where the in-scope structural degradation detection isn't enough — keeping the core scope honest and the heavier checks opt-in.
 - **Bench against LangChain + langchain-resilience** to publish a head-to-head.
+
+Already shipped since initial submission:
+
+- **OpenTelemetry trace propagation** — outbound LLM/MCP calls now emit child spans with `tool.cache.hit`, `before.tokens`, `after.tokens` attributes.
+- **Per-session tool result cache** — in-memory LRU (default 64 entries) keyed on normalized `(tool, input)`; eliminates repeated round-trips within a single ReAct turn. Metrics: `agentshield_tool_cache_hits_total{tool}` / `agentshield_tool_cache_misses_total{tool}`.
+- **Transcript summarization** — when the running Thought/Action/Observation history exceeds `AGENTSHIELD_REACT_MAX_TRANSCRIPT_TOKENS` (default 6000), the oldest 50% is replaced by an LLM summary, keeping prompt size bounded across deep reasoning chains. Metrics: `agentshield_react_summarizations_total`, `agentshield_react_transcript_tokens`.
 
 ---
 

@@ -139,12 +139,15 @@ No manual tuning.
 
 ## ReAct Agent with Tool Use
 
-`POST /react` runs a full Reason + Act loop. The LLM can invoke tools; each tool has its own circuit breaker.
+`POST /react` runs a full Reason + Act loop. The LLM can invoke tools; each tool has its own circuit breaker. Two cooperative features keep long sessions from degrading:
+
+- **Per-session tool result cache** — identical (case- and whitespace-normalized) tool calls within one chat turn are answered from an in-memory LRU cache instead of making another round-trip. Eliminates the "same `mcp_lookup` three times in a row" thrash pattern. Configurable via `AGENTSHIELD_TOOL_CACHE_ENABLED` / `AGENTSHIELD_TOOL_CACHE_MAX_ENTRIES` (default 64 entries).
+- **Transcript summarization** — when the running Thought/Action/Observation history grows past `AGENTSHIELD_REACT_MAX_TRANSCRIPT_TOKENS` (default 6000), the oldest 50% is replaced by a single-paragraph LLM summary before the next reasoning call, keeping prompt size bounded and latency stable across deep reasoning chains.
 
 ```
 prompt → LLM reasons → decides to call tool → tool executes → LLM processes result → ...
-              │                                        │
-         degradation chain                     tool's own CB
+              │                │ transcript check           │ cache check (Part A)
+         degradation chain     └─ maybe summarize (Part B)  └─ skip round-trip on hit
          (4 tiers above)
 ```
 

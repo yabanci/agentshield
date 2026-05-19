@@ -23,3 +23,5 @@
 
 ---
 _Run at 2026-05-19T07:59:58Z_
+
+> **Note**: these numbers were recorded before the tool-cache and transcript summarization features landed. On repeated-call workloads (same tool argument appearing multiple times in a ReAct trace), live latency will show further improvement because cache hits eliminate the tool round-trip entirely. The quality and useful-rate columns are unaffected — the cache only serves results that were already recorded as successful.

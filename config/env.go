@@ -4,9 +4,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// parseInt is a thin wrapper around strconv.Atoi used only inside this file.
+// It keeps env parsing call-sites concise without leaking strconv into callers.
+func parseInt(s string) (int, error) { return strconv.Atoi(s) }
 
 // LoadFromEnv builds a Config from defaults, overrides with environment variables,
 // then validates. Returns the first validation error if any.
@@ -104,6 +109,22 @@ func LoadFromEnv() (*Config, error) {
 	if v := os.Getenv("OTEL_EXPORTER_OTLP_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			c.OTel.Timeout = d
+		}
+	}
+
+	// Tool cache — per-session LRU cache that short-circuits repeated tool calls.
+	if v := os.Getenv("AGENTSHIELD_TOOL_CACHE_ENABLED"); v == "false" {
+		c.ToolCache.Enabled = false
+	}
+	if v := os.Getenv("AGENTSHIELD_TOOL_CACHE_MAX_ENTRIES"); v != "" {
+		if n, err := parseInt(v); err == nil && n > 0 {
+			c.ToolCache.MaxEntries = n
+		}
+	}
+	// ReAct summarization — compress the transcript when it exceeds the threshold.
+	if v := os.Getenv("AGENTSHIELD_REACT_MAX_TRANSCRIPT_TOKENS"); v != "" {
+		if n, err := parseInt(v); err == nil && n > 0 {
+			c.ReAct.MaxTranscriptTokens = n
 		}
 	}
 
