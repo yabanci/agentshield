@@ -191,6 +191,26 @@ HTTP boundary, not anything spec-specific.
 
 ---
 
+## Benchmark: AgentShield vs Naive Integration
+
+Reproducible numbers from the deterministic bench harness in `bench/`. Each scenario ran 50 requests per path. Full methodology in [`bench/README.md`](bench/README.md).
+
+| Scenario | Naive useful% | AgentShield useful% | What happened |
+|----------|---------------|---------------------|---------------|
+| **garbage** (HTTP 200, bad content) | 0% | **100%** | Naive returns whatever the model said; AgentShield's quality gate intercepts score < 0.45 and routes to fallback |
+| **brownout** (p95 = 8.8s, 20% garbage) | 76% | **100%** | Naive silently delivers the 24% garbage; AgentShield filters them to fallback |
+| **down** (503 / connection refused) | 0% | **100%** | Naive errors out; AgentShield serves from cache then falls back to graceful denial |
+
+Full table with latency percentiles: [`bench/results.md`](bench/results.md) | Raw CSV: [`bench/results.csv`](bench/results.csv)
+
+To reproduce:
+
+```bash
+go run ./bench/cmd/bench -mode all -n 50 -seed 42
+```
+
+---
+
 ## Resilience Score
 
 A single 0–100 metric that aggregates all resilience dimensions. Five components, 20 points each. Updates live in the dashboard.
