@@ -104,3 +104,27 @@ func TestToolCache_DisabledState(t *testing.T) {
 		t.Error("expected miss when cache is disabled")
 	}
 }
+
+// TestToolCache_DisabledMetrics verifies that a disabled cache always returns
+// miss (false) for every Get — the caller is expected to execute the tool and
+// increment the misses counter. This test locks in that the disabled path does
+// not silently return hits (which would suppress tool execution).
+func TestToolCache_DisabledMetrics(t *testing.T) {
+	c := newToolCache(64, false)
+
+	// Populate with Set (no-op when disabled, but we call it to be explicit).
+	c.Set("calculate", `{"expression":"1+1"}`, "2")
+	c.Set("get_time", `{"timezone":"UTC"}`, "Monday, 01 January 2024 00:00:00")
+
+	tools := []struct{ name, input string }{
+		{"calculate", `{"expression":"1+1"}`},
+		{"get_time", `{"timezone":"UTC"}`},
+		{"search_docs", `{"query":"circuit breaker"}`},
+	}
+	for _, tc := range tools {
+		_, hit := c.Get(tc.name, tc.input)
+		if hit {
+			t.Errorf("disabled cache: Get(%q, %q) returned hit, want miss", tc.name, tc.input)
+		}
+	}
+}

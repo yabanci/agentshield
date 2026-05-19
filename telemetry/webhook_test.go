@@ -15,6 +15,7 @@ import (
 func TestWebhook_FiredOnSemanticCBStateChange(t *testing.T) {
 	var mu sync.Mutex
 	var received []telemetry.WebhookEvent
+	done := make(chan struct{})
 
 	// Create a test webhook server
 	webhookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -24,8 +25,12 @@ func TestWebhook_FiredOnSemanticCBStateChange(t *testing.T) {
 			return
 		}
 		mu.Lock()
+		alreadyDone := len(received) > 0
 		received = append(received, ev)
 		mu.Unlock()
+		if !alreadyDone {
+			close(done)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer webhookSrv.Close()
@@ -61,15 +66,10 @@ func TestWebhook_FiredOnSemanticCBStateChange(t *testing.T) {
 		sb.Record(0.10, quality.QualityResult{Score: 0.10})
 	}
 
-	// Give webhook goroutine time to fire
-	time.Sleep(100 * time.Millisecond)
-
-	mu.Lock()
-	count := len(received)
-	mu.Unlock()
-
-	if count == 0 {
-		t.Error("expected at least one webhook event after CB state change")
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("webhook never fired")
 	}
 
 	mu.Lock()
@@ -85,9 +85,12 @@ func TestWebhook_FiredOnSemanticCBStateChange(t *testing.T) {
 }
 
 func TestWebhook_NoFireWhenURLNotSet(t *testing.T) {
-	fired := false
+	fired := make(chan struct{}, 1)
 	webhookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fired = true
+		select {
+		case fired <- struct{}{}:
+		default:
+		}
 	}))
 	defer webhookSrv.Close()
 
@@ -95,10 +98,11 @@ func TestWebhook_NoFireWhenURLNotSet(t *testing.T) {
 	// No URL set
 
 	dispatcher.Fire(telemetry.WebhookEvent{Event: "test"})
-	time.Sleep(50 * time.Millisecond)
-
-	if fired {
+	select {
+	case <-fired:
 		t.Error("webhook should not fire when URL is not set")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: no fire within the window.
 	}
 }
 

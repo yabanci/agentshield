@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/yabanci/agentshield/memory"
 	"github.com/yabanci/agentshield/telemetry"
@@ -117,7 +118,6 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 		tokens := estimateTokens(conversationCtx)
 		telemetry.ReactTranscriptTokens.Observe(float64(tokens))
 		if tokens >= threshold {
-			telemetry.ReactSummarizationsTotal.Inc()
 			conversationCtx = a.summarizeTranscript(iterCtx, conversationCtx, threshold)
 		}
 
@@ -141,18 +141,26 @@ func (a *Agent) React(ctx context.Context, prompt, sessionID string) (ReactRespo
 			toolSpan.SetAttributes(attribute.String("tool.input", inputStr))
 
 			// Part A: check per-session tool cache before calling the tool.
-			toolNameLower := strings.ToLower(step.Action)
+			// Sanitize the tool label to the known registry to prevent unbounded
+			// Prometheus cardinality when the LLM emits an unrecognised tool name.
+			knownTools := tools.KnownNames()
+			canonicalTool := "unknown"
+			if _, ok := knownTools[strings.ToLower(step.Action)]; ok {
+				canonicalTool = strings.ToLower(step.Action)
+			}
 			var obs string
 			if cached, hit := tc.Get(step.Action, inputStr); hit {
 				obs = cached
 				toolSpan.SetAttributes(attribute.Bool("tool.cache.hit", true))
-				telemetry.ToolCacheHitsTotal.WithLabelValues(toolNameLower).Inc()
+				telemetry.ToolCacheHitsTotal.WithLabelValues(canonicalTool).Inc()
 			} else {
 				toolSpan.SetAttributes(attribute.Bool("tool.cache.hit", false))
-				telemetry.ToolCacheMissesTotal.WithLabelValues(toolNameLower).Inc()
+				telemetry.ToolCacheMissesTotal.WithLabelValues(canonicalTool).Inc()
 				var toolErr error
 				obs, toolErr = tools.Execute(toolCtx, step.Action, step.ActionInput)
 				if toolErr != nil {
+					toolSpan.RecordError(toolErr)
+					toolSpan.SetStatus(codes.Error, toolErr.Error())
 					obs = fmt.Sprintf("Tool error: %v", toolErr)
 				}
 				// Only cache successful (non-error) results.
