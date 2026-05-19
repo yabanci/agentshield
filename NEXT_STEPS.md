@@ -1,113 +1,109 @@
 # NEXT_STEPS — AgentShield Hackathon Submission
 
 **Hackathon**: [TrueFoundry Resilient Agents Challenge](https://devnetwork-ai-ml-hack-2026.devpost.com/) (DevNetwork AI+ML Hackathon 2026)
-**Deadline**: 2026-05-28
-**Last session**: 2026-04-30
-**Status**: Engineering complete. 14 bugs fixed across 4 audit passes. 17 features shipped (Phases A+B+C of `docs/superpowers/specs/2026-04-30-improvements-design.md`). All tests green. CI green. Repo: https://github.com/yabanci/agentshield
+**Deadline**: 2026-05-28 @ 10:00 AM PDT → **22:00 Алматы (UTC+5)** on the same day
+**Prize**: $1,500 cash, 2 winners
+**Last refreshed**: 2026-05-19 (was 2026-04-30; that earlier snapshot is fully superseded)
+**Status**: Engineering complete — ship-ready. `v0.2.0-hackathon-submission` tagged on `main`. 14 rounds of multi-agent audit closed (~125 findings). CI green. What's left is submission packaging (video, deploy, Devpost form).
+
+Repo: https://github.com/yabanci/agentshield
+Release: https://github.com/yabanci/agentshield/releases/tag/v0.2.0-hackathon-submission
 
 ---
 
-## What's actually left to win
+## What's left to win (in priority order)
 
-### 🔴 #1 — Documentation drift fix (~30 min)
+### 🔴 #1 — Demo video (1-2h, manual)
 
-The README is out of sync with reality. Judges read READMEs.
-
-- [ ] README's Resilience Score section still says "4 components × 25pts" — we changed to **5×20pts** (added Latency component). Update the score table + sparkline image to match.
-- [ ] Add new endpoints to the API list:
-  - `GET /score/history` — sparkline data
-  - `GET /health/live` — process liveness (always 200)
-  - `GET /health/ready` — Ollama-aware readiness
-  - `GET /auth/required` — dashboard auth probe
-  - `POST /demo/degrade`, `POST /demo/restore-quality` — semantic CB demo
-- [ ] Add Configuration section documenting env vars:
-  - `PORT` (default 8080)
-  - `OLLAMA_URL` (default http://localhost:11434)
-  - `AGENTSHIELD_AUTH_TOKEN` — bearer token; if set, gates `/demo/*` and `/config/*`
-  - `AGENTSHIELD_ALLOW_HTTP_WEBHOOK=true` — let webhook URLs use http://
-  - `AGENTSHIELD_ALLOW_PRIVATE_WEBHOOK=true` — let webhook URLs target private/loopback IPs (dev only)
-- [ ] Update degradation chain ASCII diagram to mention SSE heartbeat in streaming
-- [ ] Mention drift detection + resilience score sparkline as features
-
-### 🔴 #2 — Demo video (1-2h)
-
-This is THE thing that wins or loses the hackathon. Suggested arc:
+THE single biggest variable. Script is finalised at [`docs/demo-script.md`](docs/demo-script.md) (2:50 timing). Recording is on you — Kap / OBS / `ffmpeg avfoundation` all work on macOS. Suggested arc:
 
 ```
-0:00  Dashboard at Score: 100. "AgentShield is a resilience layer for LLM agents."
-0:15  Send normal prompt. Show response, click trace icon → modal with full step list.
-0:30  THE KILLER MOMENT: click 🧪 Enable Degrade. Send prompt. Response is gibberish.
-       Pause on dashboard: transport=closed ✅ but quality=failing ✗.
-       "Traditional circuit breakers don't catch this. AgentShield does."
-1:00  Click ▶ Run Chaos Demo. Watch sparkline drop 100 → 41 → 78 → 94 live.
-       Cost savings number ticks up in real time.
-1:30  Switch to Streaming mode, prompt that triggers quality gate.
-       Show orange divider mid-response: "⚡ quality gate triggered, switched to fallback".
-1:45  Cut to README + flowguard repo: "Powered by my own resilience library."
-2:00  End card with GitHub URL + Devpost submission link.
+0:00  Dashboard at Score: 100. "AgentShield catches LLM failures that HTTP 200 hides."
+0:15  Normal prompt → response → click trace icon → modal shows tier=primary, score=0.95
+0:30  THE KILLER MOMENT: 🧪 Enable Degrade → send same prompt → response is gibberish
+       Pause on dashboard: cb=closed ✅ but sb=failing ✗
+       "Every other circuit breaker says 'all good'. AgentShield catches the lie."
+1:00  ▶ Run Chaos Demo → quality sparkline drops 100 → 41 → 78 → 95 live
+       Tier badge flips through primary → fallback → cache → denied
+1:30  Switch to Streaming mode → quality-gated mid-stream
+       Orange divider: "⚡ quality gate triggered, switched to fallback"
+2:00  README + flowguard sister repo: "Powered by my own resilience library."
+2:30  Bench numbers table: naive 0% useful vs AgentShield 100% on garbage
+2:50  End card: GitHub URL + Devpost link
 ```
 
-### 🟡 #3 — Live deployment to TrueFoundry (1-2h)
+### 🔴 #2 — Live deployment (30min-2h)
 
-Right now `truefoundry/deploy.py` and `service.yaml` exist but no live instance.
+`truefoundry/deploy.py` and `truefoundry/service.yaml` are ready. Full command-by-command runbook with both TrueFoundry and Fly.io paths lives in **[`docs/deploy-runbook.md`](docs/deploy-runbook.md)** — follow that. Plan to deploy on **2026-05-20** so there's a week-long buffer for surprises (auth, billing, image push, ingress, model availability).
 
-```bash
-pip install truefoundry
-tfy login
-tfy secret create --name OLLAMA_URL --value "http://<your-ollama-host>:11434"
-python truefoundry/deploy.py --workspace <YOUR_WORKSPACE_FQN>
-```
+### 🔴 #3 — Devpost submission form (15min copy-paste)
 
-Optional: also configure `AGENTSHIELD_AUTH_TOKEN` so judges can't kill the model.
+Full text drafted in [`docs/devpost-submission.md`](docs/devpost-submission.md). Paste into Devpost. Don't leave this for May 28 — submit at least 4h before deadline.
 
-### 🟡 #4 — Devpost submission text (2-3h)
+### 🟡 #4 — Dashboard screenshot in README (5min)
 
-Template:
-- **Tagline**: "The first circuit breaker that understands LLM quality"
-- **Inspiration**: Production LLMs fail silently — HTTP 200 with garbage is invisible to traditional tooling
-- **What it does**: 5-component resilience stack with semantic CB, adaptive calibration, drift detection, cost tracking, ReAct agent
-- **How we built it**: Go + own flowguard library + Ollama; the Resilience Score (5×20pts) gives judges one number to grok everything
-- **Challenges**: 4 audit passes, 14 bugs found, 17 improvements shipped, calibrating quality thresholds
-- **Accomplishments**: Semantic CB is unique; adaptive thresholds, async embedding, streaming quality gate
-- **What we learned**: Production AI needs different observability than traditional services
-- **What's next**: Multi-provider LLM support (OpenAI/Groq/Anthropic), conversation summarization, OpenTelemetry, OpenAPI spec (Phase D backlog)
+README has a placeholder near the top. Take a clean screenshot of the dashboard in "everything green" state (Score=100, all tiers shown) plus one in "everything degraded" state (Score~40, semantic CB failing). Drop into `docs/img/` and update README.
 
-### 🟢 #5 — Polish (30 min)
+### 🟡 #5 — Chaos demo GIF (10min)
 
-- [ ] Dashboard screenshot at top of README
-- [ ] 30-second GIF of the chaos demo
-- [ ] Update GitHub repo description (one-liner under repo name)
-- [ ] Pin agentshield + flowguard repos on your GitHub profile
+`ffmpeg -i recording.mov -vf "fps=12,scale=1200:-1" -loop 0 chaos-demo.gif`. Cut to the ~30s sparkline drop + tier badge flips. Embed under the README screenshot.
+
+### 🟢 #6 — Pin repos on GitHub profile (1min)
+
+Pin `agentshield` and `flowguard` (the sister resilience library) on your GitHub profile so the judges who click through see them first.
+
+---
+
+## What's already done since this doc was last touched (2026-04-30 → 2026-05-19)
+
+Every Phase D item from the old NEXT_STEPS shipped. Don't waste time re-checking:
+
+| Item | Where | PR |
+|---|---|---|
+| Multi-provider LLM (Ollama + OpenAI-compat: Groq, OpenRouter, vLLM, Mistral) | `provider/` | #13 |
+| ReAct transcript summarization | `agent/summarize.go` | #21 |
+| Tool result caching | `agent/toolcache.go` | #21 |
+| OpenTelemetry distributed tracing | `telemetry/otel.go` + outbound `otelhttp` wrappers | #20 |
+| `Config` struct replacing scattered constants | `config/config.go` | #11 |
+| Agent god-object decomposed | Orchestrator extracted to `orchestrator/` | Round 7 |
+| Bench vs naive integration (real numbers) | `bench/` | #19 |
+| Grafana dashboard + Prometheus alerts | `deploy/` | #17 |
+| `handler.go` integration tests (52.7% coverage) | `api/handler_test.go` | #18 |
+| MCP integration (5th ReAct tool + standalone mock) | `agent/mcp_tool.go` + `cmd/mcp-mock/` | Round 8 |
+| README polish + Resilience-score table sync | `README.md` | #16, #17, #20 |
+| All endpoints documented + Configuration env-var table | `README.md` | #20 |
+
+The "5 × 20pts Resilience Score" model is in the dashboard; the README is in sync.
+
+---
+
+## State of the codebase (current)
+
+- **18 Go packages**, 13 with tests, all `-race -count=1` green
+- **golangci-lint v2.11.4** with `forbidigo` rule: `os.Getenv` allowed ONLY in `config/` (exemption for `cmd/mcp-mock/`)
+- **`toolchain go1.26.3`** pinned in `go.mod` (closes 4 stdlib CVEs incl. high-severity XSS bypass in `html/template`)
+- **`Agent` struct** decomposed: Orchestrator owns the 4-tier degradation chain, Agent owns ReAct + tools + summarization + cache
+- **18 env vars** consumed by `config/env.go` — full list in [`docs/deploy-runbook.md`](docs/deploy-runbook.md)
+- **Auth defaults to OFF** for local dev; any shared deployment MUST set `AGENTSHIELD_AUTH_TOKEN`
 
 ---
 
 ## Hard rules to remember
 
-- **Never push directly to main** — always feature branch + PR (per CLAUDE.md)
-- **flowguard** is the dependency library; agentshield consumes it. Both maintained separately.
-- **Phase D items are intentionally deferred** to post-submission backlog. Do NOT scope-creep them in.
+- **Never push directly to `main`** — feature branch + PR always (per `CLAUDE.md`)
+- **flowguard** is the sister dependency library (v0.3.0); agentshield consumes it. Both maintained separately. Two pinned repos on the GH profile reinforces the story.
+- **Submit Devpost ≥ 4h before deadline** (2026-05-28 18:00 Алматы), not in the final hour.
+- **Demo video records the live dashboard, not a mock-up.** If TrueFoundry deploy fails on May 27, fall back to local recording — better a local recording than no video.
 
-## State of the codebase
+---
 
-- 27 fields in `Agent` struct (God object growing — known debt, post-submission refactor)
-- `dashboard.go` is ~900 lines mixed HTML/CSS/JS in a Go string literal (known debt)
-- 5×20 Resilience Score: Transport / Quality / Cache / Availability / **Latency**
-- Auth defaults to OFF (preserves dev experience). Production deploy should set `AGENTSHIELD_AUTH_TOKEN`.
+## After the deadline (post-submission backlog)
 
-## Phase D — explicitly deferred
+These are intentionally NOT for the hackathon submission. Listed here so they don't get pulled in by accident:
 
-These are NOT for the hackathon. After the deadline, in priority order:
-
-1. Multi-provider LLM support — abstract `ollamaClient` behind an `LLMProvider` interface; support OpenAI/Groq/TrueFoundry inference
-2. Conversation summarization — when session > 20 messages, summarize older turns
-3. Tool result caching — `(tool_name, args_hash) → result`
-4. W3C trace context / OpenTelemetry
-5. OpenAPI / Swagger spec
-6. `Config` struct to replace scattered hardcoded constants
-7. Refactor Agent God object into composed sub-components
-8. Real load testing (1000+ concurrent requests) + memory profiling
-
-## Tests written but engineered
-
-- `TestStream_QualityGateSwitchesToFallback` is engineered against specific tokenization. With real LLM streams, comma-bearing patterns ("i apologize, but as an") wouldn't match. Pass doesn't fully validate production behavior.
-- `cache_test.go` async embedding test polls up to 1s — possibly flaky on slow CI.
+1. OpenAPI / Swagger spec (currently only the dashboard documents endpoints visually)
+2. Real load testing (1000+ concurrent requests) + memory profiling — `bench/` is a feature-correctness comparison, not a load test
+3. Cost dashboard panel showing real-time $/request avoided
+4. K8s native Helm chart (currently only Docker + TrueFoundry SDK)
+5. Multi-region failover demo
+6. Async embedding queue for the semantic cache (currently sync)
