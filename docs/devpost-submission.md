@@ -69,7 +69,7 @@ Threats from an adversarial round 8: a malicious visitor on a public live URL co
 - **The semantic CB is genuinely novel** for this hackathon track — every other resilience library opens on transport.
 - **All three TrueFoundry failure modes covered explicitly** — LLM down (transport CB + fallback), LLM brownout (semantic CB), MCP erroring (per-tool CB with bundled mock for the demo).
 - **Multi-provider abstraction** — the same resilience stack runs against Ollama, OpenAI, Groq, OpenRouter, vLLM. One env var.
-- **~100 findings surfaced and resolved through ten rounds of multi-agent security and correctness audit**, including 4 stdlib CVEs (XSS escaper bypass in `html/template` reachable via the dashboard template path, closed by toolchain bump to go1.26.3). The audit reports are in the repo at `docs/superpowers/`.
+- **~125 findings surfaced and resolved through fourteen rounds of multi-agent security and correctness audit**, including 4 stdlib CVEs (XSS escaper bypass in `html/template` reachable via the dashboard template path, closed by toolchain bump to go1.26.3). Each round closes with a `fix: round-N — …` commit in `git log`; design specs are in `docs/superpowers/`.
 - **Race-clean test suite** at `go test -race -count=10`. Sustained-load stress + fuzz tests.
 
 ---
