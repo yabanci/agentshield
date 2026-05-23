@@ -4,7 +4,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/yabanci/agentshield)](https://goreportcard.com/report/github.com/yabanci/agentshield)
 [![Go Reference](https://pkg.go.dev/badge/github.com/yabanci/agentshield.svg)](https://pkg.go.dev/github.com/yabanci/agentshield)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Security: 11 audit rounds](https://img.shields.io/badge/security%20audits-11%20rounds-brightgreen)](./SECURITY.md)
+[![Security: 14 audit rounds](https://img.shields.io/badge/security%20audits-14%20rounds-brightgreen)](./SECURITY.md)
 
 > 🏆 **Submission for the [TrueFoundry Resilient Agents Challenge](https://devnetwork-ai-ml-hack-2026.devpost.com/) — DevNetwork AI+ML Hackathon 2026**
 
@@ -24,7 +24,7 @@ Powered by [flowguard](https://github.com/yabanci/flowguard).
 - **One demo button to click**: 🧪 **Enable Degrade** on the dashboard, then 🧪 **Run Compare** to see shielded vs raw side by side. The contrast is the value-prop.
 - **One env var for hosted backends**: `LLM_PROVIDER=openai` + `OPENAI_API_KEY` and the same resilience stack runs against OpenAI / Groq / OpenRouter / vLLM. See [Quick Start](#quick-start).
 - **All three TrueFoundry failure modes covered**: LLM down → transport CB + fallback tier; LLM brownout → semantic CB (the unique angle); MCP server erroring → per-tool CB on `mcp_lookup` with bundled `cmd/mcp-mock/` to demo it.
-- **Engineering depth**: 12 cohesive Go packages, race-clean under `-race -count=10`, ten rounds of multi-agent audit closed ~100 findings (reports in `docs/superpowers/`).
+- **Engineering depth**: 12 cohesive Go packages, race-clean under `-race -count=10`, fourteen rounds of multi-agent audit closed ~125 findings (per-round summaries in `git log` as `fix: round-N — …` commits; design specs in `docs/superpowers/`).
 
 ---
 
