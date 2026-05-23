@@ -564,12 +564,20 @@ truefoundry/
 ## Tests
 
 ```bash
-go test ./...                   # all tests
-go test -race ./...             # with race detector
-go test -race -count=5 ./...    # stress test
+make test            # go test ./... -race -count=1   (all packages, race detector on)
+make coverage        # cross-package coverage (the honest number — see note below)
+make vuln            # govulncheck ./...              (zero known CVEs as of v0.2.0)
+make lint            # golangci-lint run ./...
+make smoke           # live HTTP smoke against a running agentshield on :8080
 ```
 
 All tests use `httptest.Server` — no running Ollama required.
+
+**Coverage note.** Default `go test -cover ./...` only counts coverage inside
+each test's own package, so the orchestrator package (covered by `agent/`
+integration tests, not by its own unit tests) reports a misleading ~10%.
+`make coverage` uses `-coverpkg=./...` to attribute coverage to where the
+code actually lives, which yields the honest **71.2% project-wide** total.
 
 ---
 
