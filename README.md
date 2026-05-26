@@ -16,6 +16,11 @@ Powered by [flowguard](https://github.com/yabanci/flowguard).
 > 🌐 **Live dashboard**: _link goes here once deployed_
 > 📸 _Dashboard screenshot / chaos-demo GIF goes here_
 
+> 📖 **New to the project or the jargon?** The [**Architecture Guide**](docs/architecture/README.md)
+> explains what AgentShield is, the problem it solves, and how it works inside —
+> with diagrams and a plain-English glossary, written for someone seeing it for
+> the first time.
+
 ---
 
 ## TL;DR for judges in 30 seconds
