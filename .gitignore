@@ -19,3 +19,6 @@ coverage.txt
 
 # OS
 .DS_Store
+
+# Superpowers / AI-agent working artifacts — never commit (mirrors global ~/.config/git/ignore)
+docs/superpowers/
