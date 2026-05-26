@@ -29,7 +29,7 @@ Powered by [flowguard](https://github.com/yabanci/flowguard).
 - **One demo button to click**: 🧪 **Enable Degrade** on the dashboard, then 🧪 **Run Compare** to see shielded vs raw side by side. The contrast is the value-prop.
 - **One env var for hosted backends**: `LLM_PROVIDER=openai` + `OPENAI_API_KEY` and the same resilience stack runs against OpenAI / Groq / OpenRouter / vLLM. See [Quick Start](#quick-start).
 - **All three TrueFoundry failure modes covered**: LLM down → transport CB + fallback tier; LLM brownout → semantic CB (the unique angle); MCP server erroring → per-tool CB on `mcp_lookup` with bundled `cmd/mcp-mock/` to demo it.
-- **Engineering depth**: 12 cohesive Go packages, race-clean under `-race -count=10`, fourteen rounds of multi-agent audit closed ~125 findings (per-round summaries in `git log` as `fix: round-N — …` commits; design specs in `docs/superpowers/`).
+- **Engineering depth**: 12 cohesive Go packages, race-clean under `-race -count=10`, fourteen rounds of multi-agent audit closed ~125 findings (per-round summaries in `git log` as `fix: round-N — …` commits).
 
 ---
 
