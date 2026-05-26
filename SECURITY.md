@@ -8,8 +8,7 @@ question, so the project has been put through **fourteen rounds of
 multi-agent audit** focused on different threat surfaces, not just
 correctness. Each round closes with a `fix: round-N — …` commit listing
 the findings addressed — `git log --oneline | grep round-` is the
-canonical public audit trail. Design specs and planning docs that fed
-the audits live in `docs/superpowers/`.
+canonical public audit trail.
 
 ## Threats addressed in the codebase today
 
