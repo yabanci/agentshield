@@ -154,11 +154,22 @@ The actual LLM backends AgentShield can talk to.
 ### OpenTelemetry (OTel)
 
 The industry-standard toolkit for **traces and metrics**. It lets you record,
-for each request, a tree of "spans" (this called that, which called this…) and
+for each request, a tree of "[spans](#span)" (this called that, which called this…) and
 ship them to a viewer (Jaeger, Grafana Tempo, HyperDX) where you see a
 flame-graph of where time went. AgentShield wraps its outbound calls and adds a
 span per [tier](#resilience-score) tried, tagged with quality scores and breaker
 states.
+
+### Percentile (p50 / p95 / p99)
+
+A way to describe a *spread* of measurements (usually latencies) without being
+fooled by averages. "**p95** = 400 ms" means **95% of requests were faster than
+400 ms** (and the slowest 5% were worse). p50 is the median (half faster, half
+slower); p99 is the slowest 1% — the "tail." Why not just use the average? One
+very slow request can drag the average up and hide that most requests were fine,
+or a few fast ones can hide a bad tail. Percentiles tell you "what does a *typical*
+user see (p50)" vs "what does an *unlucky* user see (p95/p99)." AgentShield's
+[hedging](#hedged-request) exists specifically to improve the p95/p99 tail.
 
 ### Prometheus
 
@@ -178,6 +189,15 @@ short / too long), **refusal markers** ("As an AI language model…"),
 mismatch** (wrong script). Penalties stack. A total below 0.45 with at least one
 signal firing counts as a quality failure. Crucially, none of these call another
 AI — they're fast string/maths checks, a millisecond or two each.
+
+### Quantized
+
+A **compressed** version of an AI model. The model's internal numbers are
+stored at lower precision (e.g. 8-bit or 4-bit instead of 16-bit), which makes
+it much smaller and cheaper to run — at the cost of some quality. Providers
+sometimes quietly serve a quantized model under heavy load to save GPU. From the
+outside you can't see the swap; you only notice the answers got a bit worse. It's
+one of the real-world causes of a [brownout](#brownout).
 
 ### ReAct (Reason + Act)
 
@@ -235,13 +255,23 @@ thresholds to each model (see [The Two Circuit Breakers](03-two-circuit-breakers
 "Semantic" just means "relating to meaning." No other resilience library has
 this — it's the project's contribution.
 
+### Span
+
+One **timed step inside a [trace](#trace)**. If a trace is the whole story of a
+request, a span is one chapter: "called the primary model — took 240 ms." Spans
+nest (a parent span contains child spans), which is what produces the
+"flame-graph" picture — a stack of nested bars showing where time went.
+AgentShield creates one span per [tier](#resilience-score) it tries, tagged with
+that tier's quality score and breaker state. The term comes from
+[OpenTelemetry](#opentelemetry-otel).
+
 ### SSE (Server-Sent Events) / streaming
 
 A way for a server to **push a response piece by piece** over a single HTTP
 connection, instead of sending it all at once at the end. It's how chat UIs show
-the answer "typing out" token by token. AgentShield supports streaming and adds
-a twist: a **quality gate** inside the stream — if it spots refusal markers in
-the first ~120 tokens, it *aborts the stream mid-flight* and restarts from the
+the answer "typing out" [token](#token) by token. AgentShield supports streaming
+and adds a twist: a **quality gate** inside the stream — if it spots refusal
+markers in the first ~120 tokens, it *aborts the stream mid-flight* and restarts from the
 fallback model, so the user doesn't watch garbage scroll by.
 
 ### Standard deviation (σ)
@@ -252,6 +282,16 @@ place (variable). AgentShield's [semantic breaker](#semantic-circuit-breaker)
 uses it during self-calibration: it sets its "failing" threshold at `mean − 2σ`,
 i.e. "more than two standard deviations below this model's normal." It floors σ
 at 0.05 so an extremely consistent model doesn't get a hair-trigger breaker.
+
+### Token
+
+The **unit an LLM reads and writes** — not quite a word, not quite a letter.
+Models chop text into "tokens": common words are one token ("cat"), rarer or
+longer words split into pieces ("tokenization" → "token" + "ization"). Roughly,
+1 token ≈ 0.75 English words. It matters here for two reasons: LLMs generate text
+*one token at a time* (which is why [streaming](#sse-server-sent-events--streaming)
+can show an answer "typing out"), and providers bill *per token*. AgentShield's
+streaming quality gate inspects the first ~120 tokens to catch a bad answer early.
 
 ### Trace
 

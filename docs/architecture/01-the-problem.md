@@ -81,7 +81,7 @@ a 200 OK.
 ### Why this happens
 
 LLMs degrade for boring, real reasons: the provider quietly swapped you to a
-smaller model under load, a quantized version is being served to save GPU, the
+smaller model under load, a [quantized](05-glossary.md#quantized) version is being served to save GPU, the
 context got truncated, a sampling parameter drifted, the model hit a bad region
 of its probability distribution. You usually can't see *why* from the outside —
 you only see the bad text.
